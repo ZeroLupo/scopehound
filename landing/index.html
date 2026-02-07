@@ -1,0 +1,1147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ScopeHound — AI-Powered Competitive Intelligence</title>
+  <meta name="description" content="Open-source AI agent that monitors competitor pricing, features, SEO, blogs, and Product Hunt launches. Runs on Cloudflare Workers. $0 to self-host.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ===== DESIGN TOKENS ===== */
+    :root {
+      --bg: #0a0c0e;
+      --bg-panel: #12161a;
+      --bg-elevated: #1a1f25;
+      --border: #2a3038;
+      --text: #d4d8de;
+      --text-muted: #6b7280;
+      --olive: #5c6b3c;
+      --olive-light: #7a8c52;
+      --tan: #c4a747;
+      --red: #c23030;
+      --green: #3d6b35;
+      --font-mono: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", monospace;
+      --max-width: 1120px;
+      --section-gap: 96px;
+    }
+
+    /* ===== RESET ===== */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+    }
+
+    /* ===== UTILITIES ===== */
+    .container {
+      width: 100%;
+      max-width: var(--max-width);
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    .section-label {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 48px;
+    }
+
+    .section-label span {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .section-label::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    section {
+      padding-top: var(--section-gap);
+    }
+
+    .section-divider {
+      width: 100%;
+      height: 1px;
+      background: var(--border);
+      margin-top: var(--section-gap);
+    }
+
+    /* ===== BUTTONS ===== */
+    .btn {
+      display: inline-block;
+      padding: 12px 28px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      cursor: pointer;
+      transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+      text-align: center;
+      line-height: 1;
+    }
+
+    .btn-primary {
+      background: var(--olive);
+      color: #fff;
+      border-color: var(--olive);
+    }
+
+    .btn-primary:hover {
+      background: var(--olive-light);
+      border-color: var(--olive-light);
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text);
+      border-color: var(--border);
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--text-muted);
+      color: #fff;
+    }
+
+    .btn-tan {
+      background: transparent;
+      color: var(--tan);
+      border-color: var(--tan);
+    }
+
+    .btn-tan:hover {
+      background: var(--tan);
+      color: var(--bg);
+    }
+
+    /* ===== COMMAND HEADER ===== */
+    .nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 1000;
+      background: rgba(10, 12, 14, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      height: 56px;
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 56px;
+    }
+
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .nav-shield {
+      width: 22px;
+      height: 26px;
+      position: relative;
+    }
+
+    .nav-shield svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .nav-wordmark {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 32px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      transition: color 0.2s ease;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+    }
+
+    .nav-links .disabled {
+      color: var(--border);
+      cursor: default;
+      position: relative;
+    }
+
+    .nav-links .disabled:hover {
+      color: var(--border);
+    }
+
+    .nav-coming-soon {
+      font-size: 8px;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      position: absolute;
+      bottom: -12px;
+      left: 50%;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }
+
+    .nav-mobile-toggle {
+      display: none;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    .nav-mobile-toggle span {
+      display: block;
+      width: 20px;
+      height: 2px;
+      background: var(--text);
+      margin: 4px 0;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+
+    /* ===== HERO ===== */
+    .hero {
+      padding-top: 140px;
+      padding-bottom: 0;
+    }
+
+    .hero-headline {
+      font-size: clamp(28px, 4.5vw, 48px);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      line-height: 1.15;
+      color: var(--olive-light);
+      margin-bottom: 24px;
+    }
+
+    .hero-subtitle {
+      font-size: 18px;
+      color: var(--text);
+      font-weight: 400;
+      line-height: 1.5;
+      margin-bottom: 16px;
+      max-width: 520px;
+    }
+
+    .hero-desc {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.7;
+      max-width: 560px;
+      margin-bottom: 36px;
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    /* ===== CAPABILITIES GRID ===== */
+    .capabilities-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+    }
+
+    .cap-card {
+      background: var(--bg-panel);
+      padding: 28px 24px;
+    }
+
+    .cap-classification {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .cap-title {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #fff;
+      margin-bottom: 10px;
+    }
+
+    .cap-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+
+    /* ===== OPERATIONS ===== */
+    .ops-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+    }
+
+    .ops-step {
+      background: var(--bg-panel);
+      padding: 32px 28px;
+    }
+
+    .ops-number {
+      font-family: var(--font-mono);
+      font-size: 32px;
+      font-weight: 700;
+      color: var(--olive);
+      margin-bottom: 12px;
+      line-height: 1;
+    }
+
+    .ops-title {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #fff;
+      margin-bottom: 10px;
+    }
+
+    .ops-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+
+    /* ===== FIELD REPORT ===== */
+    .field-report {
+      border: 1px solid var(--olive);
+      border-radius: 2px;
+      background: var(--bg-panel);
+      overflow: hidden;
+    }
+
+    .field-report-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .fr-priority {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .fr-priority-dot {
+      width: 8px;
+      height: 8px;
+      background: var(--red);
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .fr-priority-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--red);
+    }
+
+    .fr-timestamp {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .field-report-meta {
+      display: flex;
+      gap: 32px;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+
+    .fr-meta-item {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+    }
+
+    .fr-meta-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .fr-meta-value {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .field-report-body {
+      padding: 24px;
+    }
+
+    .fr-section {
+      margin-bottom: 24px;
+    }
+
+    .fr-section:last-child {
+      margin-bottom: 0;
+    }
+
+    .fr-section-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--olive-light);
+      margin-bottom: 8px;
+    }
+
+    .fr-section-text {
+      font-size: 14px;
+      color: var(--text);
+      line-height: 1.65;
+    }
+
+    .fr-divider {
+      border: none;
+      border-top: 1px dashed var(--border);
+      margin: 24px 0;
+    }
+
+    .fr-data-line {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--tan);
+      line-height: 1.8;
+    }
+
+    /* ===== PRICING ===== */
+    .pricing-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+    }
+
+    .pricing-card {
+      background: var(--bg-panel);
+      padding: 28px 24px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .pricing-card.highlighted {
+      background: var(--bg-elevated);
+      box-shadow: inset 0 2px 0 var(--olive);
+    }
+
+    .pricing-tag {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .pricing-card.highlighted .pricing-tag {
+      color: var(--olive-light);
+    }
+
+    .pricing-name {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+
+    .pricing-price {
+      font-family: var(--font-mono);
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .pricing-price .period {
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--text-muted);
+    }
+
+    .pricing-note {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+
+    .pricing-features {
+      list-style: none;
+      margin-bottom: 24px;
+      flex: 1;
+    }
+
+    .pricing-features li {
+      font-size: 13px;
+      color: var(--text-muted);
+      padding: 5px 0;
+      line-height: 1.45;
+      border-bottom: 1px solid rgba(42, 48, 56, 0.5);
+    }
+
+    .pricing-features li:last-child {
+      border-bottom: none;
+    }
+
+    .pricing-card .btn {
+      width: 100%;
+      margin-top: auto;
+    }
+
+    .pricing-enterprise {
+      margin-top: 20px;
+      padding: 16px 24px;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      background: var(--bg-panel);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .pricing-enterprise-text {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .pricing-enterprise-text strong {
+      color: var(--text);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .pricing-enterprise-text .price {
+      font-family: var(--font-mono);
+      color: var(--tan);
+    }
+
+    /* ===== PARTNER PROGRAM ===== */
+    .partner-panel {
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      background: var(--bg-panel);
+      padding: 36px 32px;
+    }
+
+    .partner-headline {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--tan);
+      margin-bottom: 12px;
+    }
+
+    .partner-desc {
+      font-size: 15px;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+      max-width: 520px;
+    }
+
+    .partner-tiers {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      margin-bottom: 28px;
+    }
+
+    .partner-tier {
+      background: var(--bg-elevated);
+      padding: 20px;
+    }
+
+    .partner-tier-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .partner-tier-amount {
+      font-family: var(--font-mono);
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--tan);
+      margin-bottom: 4px;
+    }
+
+    .partner-tier-total {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* ===== FOOTER ===== */
+    .footer {
+      padding: 48px 0;
+      margin-top: var(--section-gap);
+      border-top: 1px solid var(--border);
+    }
+
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .footer-brand {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+
+    .footer-link {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      transition: color 0.2s ease;
+    }
+
+    .footer-link:hover {
+      color: var(--text);
+    }
+
+    .footer-tagline {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* ===== RESPONSIVE ===== */
+    @media (max-width: 900px) {
+      :root {
+        --section-gap: 72px;
+      }
+
+      .capabilities-grid,
+      .ops-grid,
+      .pricing-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .partner-tiers {
+        grid-template-columns: 1fr;
+      }
+
+      .pricing-enterprise {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .nav-links {
+        display: none;
+        position: fixed;
+        top: 56px;
+        left: 0;
+        right: 0;
+        background: rgba(10, 12, 14, 0.97);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        flex-direction: column;
+        padding: 24px;
+        gap: 20px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .nav-links.open {
+        display: flex;
+      }
+
+      .nav-mobile-toggle {
+        display: block;
+      }
+
+      .hero {
+        padding-top: 110px;
+      }
+
+      .hero-headline {
+        font-size: 26px;
+      }
+
+      .field-report-header {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .footer-inner {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .hero-actions {
+        flex-direction: column;
+      }
+
+      .hero-actions .btn {
+        width: 100%;
+      }
+
+      .capabilities-grid,
+      .ops-grid {
+        border: none;
+        background: none;
+        gap: 8px;
+      }
+
+      .capabilities-grid .cap-card,
+      .ops-grid .ops-step {
+        border: 1px solid var(--border);
+        border-radius: 2px;
+      }
+
+      .pricing-grid {
+        border: none;
+        background: none;
+        gap: 8px;
+      }
+
+      .pricing-card {
+        border: 1px solid var(--border);
+        border-radius: 2px;
+      }
+
+      .pricing-card.highlighted {
+        border-color: var(--olive);
+      }
+
+      .partner-tiers {
+        border: none;
+        background: none;
+        gap: 8px;
+      }
+
+      .partner-tier {
+        border: 1px solid var(--border);
+        border-radius: 2px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ============ COMMAND HEADER ============ -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="#" class="nav-brand">
+        <div class="nav-shield">
+          <svg viewBox="0 0 22 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M11 0L22 5V12C22 19.18 17.16 25.14 11 26C4.84 25.14 0 19.18 0 12V5L11 0Z" fill="var(--olive)"/>
+            <path d="M11 3L19 7V12C19 17.52 15.16 22.42 11 23.36C6.84 22.42 3 17.52 3 12V7L11 3Z" fill="var(--bg-panel)"/>
+            <circle cx="11" cy="12" r="3" fill="var(--olive)"/>
+            <line x1="11" y1="6" x2="11" y2="9" stroke="var(--olive)" stroke-width="1.5"/>
+            <line x1="11" y1="15" x2="11" y2="18" stroke="var(--olive)" stroke-width="1.5"/>
+            <line x1="6" y1="12" x2="8" y2="12" stroke="var(--olive)" stroke-width="1.5"/>
+            <line x1="14" y1="12" x2="16" y2="12" stroke="var(--olive)" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <span class="nav-wordmark">ScopeHound</span>
+      </a>
+      <button class="nav-mobile-toggle" id="navToggle" aria-label="Toggle navigation">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+      <ul class="nav-links" id="navLinks">
+        <li><a href="#capabilities">Features</a></li>
+        <li><a href="#operations">How It Works</a></li>
+        <li><a href="#pricing">Pricing</a></li>
+        <li><a href="#deploy" class="btn btn-secondary" style="padding:8px 18px;">Deploy</a></li>
+        <li><a href="#" class="disabled" onclick="return false;">Sign In<span class="nav-coming-soon">COMING SOON</span></a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- ============ HERO ============ -->
+  <section class="hero" id="hero">
+    <div class="container">
+      <h1 class="hero-headline">Competitive Intelligence.<br>Automated. Analyzed. Delivered.</h1>
+      <p class="hero-subtitle">Your competitors just changed their pricing.<br>You'll know in the morning.</p>
+      <p class="hero-desc">Open-source AI agent that monitors competitor pricing, features, SEO, blogs, and Product Hunt launches. Runs on Cloudflare Workers. $0 to self-host.</p>
+      <div class="hero-actions">
+        <a href="#deploy" class="btn btn-primary">Deploy Free</a>
+        <a href="#field-report" class="btn btn-secondary">View Live Demo</a>
+      </div>
+    </div>
+    <div class="container"><div class="section-divider"></div></div>
+  </section>
+
+  <!-- ============ CAPABILITIES ============ -->
+  <section id="capabilities">
+    <div class="container">
+      <div class="section-label"><span>Capabilities</span></div>
+      <div class="capabilities-grid">
+        <div class="cap-card">
+          <div class="cap-classification">SIGINT</div>
+          <div class="cap-title">Pricing Changes</div>
+          <p class="cap-desc">AI extracts exact plans, detects price shifts, new tiers, and discontinued offerings across competitor sites.</p>
+        </div>
+        <div class="cap-card">
+          <div class="cap-classification">RECON</div>
+          <div class="cap-title">Page Monitoring</div>
+          <p class="cap-desc">Homepage, features, any URL. Content-aware change detection that filters noise and surfaces real updates.</p>
+        </div>
+        <div class="cap-card">
+          <div class="cap-classification">ELINT</div>
+          <div class="cap-title">SEO Signals</div>
+          <p class="cap-desc">Title tags, meta descriptions, OG tags, H1 changes tracked. Know when competitors shift positioning.</p>
+        </div>
+        <div class="cap-card">
+          <div class="cap-classification">COMINT</div>
+          <div class="cap-title">Blog &amp; Announcements</div>
+          <p class="cap-desc">RSS monitoring. Funding rounds, partnerships, product launches, and hiring signals flagged automatically.</p>
+        </div>
+        <div class="cap-card">
+          <div class="cap-classification">OSINT</div>
+          <div class="cap-title">Product Hunt</div>
+          <p class="cap-desc">New launches in your categories. Vote tracking, maker activity, and trend detection across verticals.</p>
+        </div>
+        <div class="cap-card">
+          <div class="cap-classification">ANALYSIS</div>
+          <div class="cap-title">AI Assessment</div>
+          <p class="cap-desc">What changed. Why it matters. What to do about it. Every alert includes prioritized, actionable analysis.</p>
+        </div>
+      </div>
+    </div>
+    <div class="container"><div class="section-divider"></div></div>
+  </section>
+
+  <!-- ============ OPERATIONS ============ -->
+  <section id="operations">
+    <div class="container">
+      <div class="section-label"><span>Operations</span></div>
+      <div class="ops-grid">
+        <div class="ops-step">
+          <div class="ops-number">01</div>
+          <div class="ops-title">Deploy</div>
+          <p class="ops-desc">Fork the repo. Deploy to Cloudflare Workers with one click. Free tier covers everything you need.</p>
+        </div>
+        <div class="ops-step">
+          <div class="ops-number">02</div>
+          <div class="ops-title">Configure</div>
+          <p class="ops-desc">Run the setup wizard. Add competitors, select pages to watch, connect Slack. Two minutes, start to finish.</p>
+        </div>
+        <div class="ops-step">
+          <div class="ops-number">03</div>
+          <div class="ops-title">Monitor</div>
+          <p class="ops-desc">ScopeHound checks competitors daily. Prioritized intelligence delivered to Slack when changes are detected.</p>
+        </div>
+      </div>
+    </div>
+    <div class="container"><div class="section-divider"></div></div>
+  </section>
+
+  <!-- ============ FIELD REPORT ============ -->
+  <section id="field-report">
+    <div class="container">
+      <div class="section-label"><span>Sample Field Report</span></div>
+      <div class="field-report">
+        <div class="field-report-header">
+          <div class="fr-priority">
+            <span class="fr-priority-dot"></span>
+            <span class="fr-priority-label">High Priority</span>
+          </div>
+          <div class="fr-timestamp">06 FEB 2026 / 0900 UTC</div>
+        </div>
+        <div class="field-report-meta">
+          <div class="fr-meta-item">
+            <span class="fr-meta-label">Target:</span>
+            <span class="fr-meta-value">Acme Corp</span>
+          </div>
+          <div class="fr-meta-item">
+            <span class="fr-meta-label">Sector:</span>
+            <span class="fr-meta-value">Pricing</span>
+          </div>
+        </div>
+        <div class="field-report-body">
+          <div class="fr-section">
+            <div class="fr-section-label">Change Detected</div>
+            <p class="fr-section-text">Starter plan increased from $29/mo to $39/mo. New "Enterprise" tier added at $199/mo.</p>
+          </div>
+          <div class="fr-section">
+            <div class="fr-section-label">Assessment</div>
+            <p class="fr-section-text">34% price increase on entry plan signals confidence in product-market fit. New enterprise tier indicates upmarket positioning shift. This may create churn among price-sensitive customers in their pipeline.</p>
+          </div>
+          <div class="fr-section">
+            <div class="fr-section-label">Recommended Action</div>
+            <p class="fr-section-text">Review pricing positioning. Highlight your free tier in comparison materials targeting Acme customers. Consider targeted outreach to Acme's mid-market segment.</p>
+          </div>
+          <hr class="fr-divider">
+          <div class="fr-data-line">Starter: $29/mo &rarr; $39/mo</div>
+          <div class="fr-data-line">New: Enterprise at $199/mo</div>
+        </div>
+      </div>
+    </div>
+    <div class="container"><div class="section-divider"></div></div>
+  </section>
+
+  <!-- ============ PRICING ============ -->
+  <section id="pricing">
+    <div class="container">
+      <div class="section-label"><span>Pricing</span></div>
+      <div class="pricing-grid">
+        <!-- Self-Hosted -->
+        <div class="pricing-card">
+          <div class="pricing-tag">Open Source</div>
+          <div class="pricing-name">Self-Hosted</div>
+          <div class="pricing-price">Free</div>
+          <div class="pricing-note">Deploy on your Cloudflare account</div>
+          <ul class="pricing-features">
+            <li>Free forever</li>
+            <li>Full control over your data</li>
+            <li>Community support</li>
+            <li>MIT licensed</li>
+          </ul>
+          <a href="#deploy" class="btn btn-secondary">Deploy Now</a>
+        </div>
+        <!-- Recon -->
+        <div class="pricing-card">
+          <div class="pricing-tag">Managed</div>
+          <div class="pricing-name">Recon</div>
+          <div class="pricing-price">$0<span class="period">/mo</span></div>
+          <div class="pricing-note">Free forever</div>
+          <ul class="pricing-features">
+            <li>3 competitors</li>
+            <li>6 monitored pages</li>
+            <li>Daily scans</li>
+            <li>30-day history</li>
+            <li>1 user</li>
+            <li>Basic AI analysis</li>
+            <li>Slack alerts</li>
+          </ul>
+          <a href="#" class="btn btn-secondary">Get Started</a>
+        </div>
+        <!-- Operator -->
+        <div class="pricing-card highlighted">
+          <div class="pricing-tag">Most Popular</div>
+          <div class="pricing-name">Operator</div>
+          <div class="pricing-price">$49<span class="period">/mo</span></div>
+          <div class="pricing-note">For growing teams</div>
+          <ul class="pricing-features">
+            <li>15 competitors</li>
+            <li>60 monitored pages</li>
+            <li>Daily scans</li>
+            <li>90-day history</li>
+            <li>3 users</li>
+            <li>Full AI analysis + priority alerts</li>
+            <li>Slack alerts</li>
+          </ul>
+          <a href="#" class="btn btn-primary">Start Operating</a>
+        </div>
+        <!-- Commander -->
+        <div class="pricing-card">
+          <div class="pricing-tag">Advanced</div>
+          <div class="pricing-name">Commander</div>
+          <div class="pricing-price">$99<span class="period">/mo</span></div>
+          <div class="pricing-note">Full intelligence suite</div>
+          <ul class="pricing-features">
+            <li>25 competitors</li>
+            <li>100 monitored pages</li>
+            <li>2x daily scans</li>
+            <li>1-year history</li>
+            <li>10 users</li>
+            <li>Full AI + custom keywords</li>
+            <li>Slack + email alerts</li>
+            <li>API access</li>
+          </ul>
+          <a href="#" class="btn btn-secondary">Take Command</a>
+        </div>
+      </div>
+      <div class="pricing-enterprise">
+        <div class="pricing-enterprise-text"><strong>Strategic</strong> &mdash; <span class="price">$199/mo</span> &mdash; 50 competitors, 4x daily scans, unlimited users, dedicated support.</div>
+        <a href="#" class="btn btn-tan">Contact Us</a>
+      </div>
+    </div>
+    <div class="container"><div class="section-divider"></div></div>
+  </section>
+
+  <!-- ============ PARTNER PROGRAM ============ -->
+  <section id="partner">
+    <div class="container">
+      <div class="section-label"><span>Partner Program</span></div>
+      <div class="partner-panel">
+        <div class="partner-headline">Earn 50% Recurring Commission</div>
+        <p class="partner-desc">Refer ScopeHound. Earn 50% of all recurring revenue for 24 months. No caps, no limits, no fine print.</p>
+        <div class="partner-tiers">
+          <div class="partner-tier">
+            <div class="partner-tier-label">Operator Referral</div>
+            <div class="partner-tier-amount">$24.50/mo</div>
+            <div class="partner-tier-total">$588 total over 24 months</div>
+          </div>
+          <div class="partner-tier">
+            <div class="partner-tier-label">Commander Referral</div>
+            <div class="partner-tier-amount">$49.50/mo</div>
+            <div class="partner-tier-total">$1,188 total over 24 months</div>
+          </div>
+          <div class="partner-tier">
+            <div class="partner-tier-label">Strategic Referral</div>
+            <div class="partner-tier-amount">$99.50/mo</div>
+            <div class="partner-tier-total">$2,388 total over 24 months</div>
+          </div>
+        </div>
+        <a href="#" class="btn btn-tan">Become a Partner</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FOOTER ============ -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-links">
+        <span class="footer-brand">ScopeHound</span>
+        <a href="#" class="footer-link">GitHub</a>
+        <a href="#" class="footer-link">Docs</a>
+        <a href="#" class="footer-link">MIT License</a>
+      </div>
+      <div class="footer-tagline">Built for operators who refuse to be blindsided.</div>
+    </div>
+  </footer>
+
+  <!-- ============ SCRIPTS ============ -->
+  <script>
+    /* Mobile nav toggle */
+    (function () {
+      var toggle = document.getElementById('navToggle');
+      var links = document.getElementById('navLinks');
+      if (!toggle || !links) return;
+
+      toggle.addEventListener('click', function () {
+        links.classList.toggle('open');
+      });
+
+      /* Close mobile nav on link click */
+      var navAnchors = links.querySelectorAll('a');
+      for (var i = 0; i < navAnchors.length; i++) {
+        navAnchors[i].addEventListener('click', function () {
+          links.classList.remove('open');
+        });
+      }
+    })();
+
+    /* Smooth scroll for anchor links */
+    (function () {
+      document.addEventListener('click', function (e) {
+        var anchor = e.target.closest('a[href^="#"]');
+        if (!anchor) return;
+        var id = anchor.getAttribute('href');
+        if (id === '#') return;
+        var target = document.querySelector(id);
+        if (!target) return;
+        e.preventDefault();
+        var offset = 72;
+        var top = target.getBoundingClientRect().top + window.pageYOffset - offset;
+        window.scrollTo({ top: top, behavior: 'smooth' });
+      });
+    })();
+  </script>
+
+</body>
+</html>

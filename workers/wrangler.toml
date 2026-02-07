@@ -1,0 +1,20 @@
+name = "scopehound"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Cron trigger - runs daily at 9am UTC
+[triggers]
+crons = ["0 9 * * *"]
+
+# KV namespace for storing state
+[[kv_namespaces]]
+binding = "STATE"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# Workers AI binding (free tier)
+[ai]
+binding = "AI"
+
+# Secrets (set via Cloudflare dashboard or wrangler):
+# ADMIN_TOKEN     - protects config API (wrangler secret put ADMIN_TOKEN)
+# SLACK_WEBHOOK_URL - optional fallback (wrangler secret put SLACK_WEBHOOK_URL)
