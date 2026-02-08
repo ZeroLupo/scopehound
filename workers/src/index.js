@@ -1002,8 +1002,9 @@ async function handleStripeWebhook(event, env) {
   // Idempotency check
   const eventKey = "processed_events:" + event.id;
   const already = await env.STATE.get(eventKey);
-  if (already) return;
-  await env.STATE.put(eventKey, "1", { expirationTtl: 86400 });
+  if (already) return { status: "duplicate" };
+
+  let processed = false;
 
   switch (event.type) {
     case "checkout.session.completed": {
@@ -1028,6 +1029,7 @@ async function handleStripeWebhook(event, env) {
       if (affCode) {
         await recordAffiliateCommission(env, affCode, userId, TIERS[tier].price * 100, tier);
       }
+      processed = true;
       break;
     }
     case "customer.subscription.updated": {
@@ -1041,6 +1043,7 @@ async function handleStripeWebhook(event, env) {
       user.tier = newTier;
       user.subscriptionStatus = sub.status;
       await env.STATE.put("user:" + userId, JSON.stringify(user));
+      processed = true;
       break;
     }
     case "customer.subscription.deleted": {
@@ -1054,6 +1057,7 @@ async function handleStripeWebhook(event, env) {
       user.subscriptionStatus = "canceled";
       user.stripeSubscriptionId = null;
       await env.STATE.put("user:" + userId, JSON.stringify(user));
+      processed = true;
       break;
     }
     case "invoice.payment_succeeded": {
@@ -1068,6 +1072,7 @@ async function handleStripeWebhook(event, env) {
       if (user.referredBy) {
         await recordAffiliateCommission(env, user.referredBy, userId, invoice.amount_paid, user.tier);
       }
+      processed = true;
       break;
     }
     case "invoice.payment_failed": {
@@ -1081,9 +1086,16 @@ async function handleStripeWebhook(event, env) {
       const user = JSON.parse(raw);
       user.subscriptionStatus = "past_due";
       await env.STATE.put("user:" + userId, JSON.stringify(user));
+      processed = true;
       break;
     }
   }
+
+  // Only mark as processed if we actually did something
+  if (processed) {
+    await env.STATE.put(eventKey, "1", { expirationTtl: 86400 });
+  }
+  return { status: processed ? "processed" : "skipped", type: event.type };
 }
 
 // ─── TIER ENFORCEMENT ───────────────────────────────────────────────────────
@@ -1809,8 +1821,8 @@ export default {
         if (!sigHeader) return new Response("Missing signature", { status: 400 });
         const event = await verifyStripeSignature(rawBody, sigHeader, env.STRIPE_WEBHOOK_SECRET);
         if (!event) return new Response("Invalid signature", { status: 400 });
-        await handleStripeWebhook(event, env);
-        return new Response("ok", { status: 200 });
+        const result = await handleStripeWebhook(event, env);
+        return new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json" } });
       }
 
       // ── Checkout ──
