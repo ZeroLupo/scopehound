@@ -4,7 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ScopeHound — AI-Powered Competitive Intelligence</title>
-  <meta name="description" content="Open-source AI agent that monitors competitor pricing, features, SEO, blogs, and Product Hunt launches. Runs on Cloudflare Workers. $0 to self-host.">
+  <meta name="description" content="AI agent that monitors competitor pricing, features, and launches — then delivers analyzed intel straight to Slack every morning. Open source. $0 to self-host.">
+  <meta property="og:title" content="ScopeHound — Competitive Intelligence, Delivered to Slack">
+  <meta property="og:description" content="AI agent that monitors competitor pricing, features, SEO, blogs, and launches. Prioritized intel delivered to Slack daily.">
+  <meta property="og:image" content="scopehound_logo.png">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="ScopeHound — Competitive Intelligence, Delivered to Slack">
+  <meta name="twitter:description" content="AI monitors your competitors. You get a Slack briefing every morning.">
+  <meta name="twitter:image" content="scopehound_logo.png">
+  <link rel="icon" type="image/png" href="scopehound_logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -178,14 +187,15 @@
     }
 
     .nav-shield {
-      width: 22px;
-      height: 26px;
+      width: 44px;
+      height: 44px;
       position: relative;
     }
 
-    .nav-shield svg {
+    .nav-shield img {
       width: 100%;
       height: 100%;
+      object-fit: contain;
     }
 
     .nav-wordmark {
@@ -833,15 +843,7 @@
     <div class="container nav-inner">
       <a href="#" class="nav-brand">
         <div class="nav-shield">
-          <svg viewBox="0 0 22 26" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M11 0L22 5V12C22 19.18 17.16 25.14 11 26C4.84 25.14 0 19.18 0 12V5L11 0Z" fill="var(--olive)"/>
-            <path d="M11 3L19 7V12C19 17.52 15.16 22.42 11 23.36C6.84 22.42 3 17.52 3 12V7L11 3Z" fill="var(--bg-panel)"/>
-            <circle cx="11" cy="12" r="3" fill="var(--olive)"/>
-            <line x1="11" y1="6" x2="11" y2="9" stroke="var(--olive)" stroke-width="1.5"/>
-            <line x1="11" y1="15" x2="11" y2="18" stroke="var(--olive)" stroke-width="1.5"/>
-            <line x1="6" y1="12" x2="8" y2="12" stroke="var(--olive)" stroke-width="1.5"/>
-            <line x1="14" y1="12" x2="16" y2="12" stroke="var(--olive)" stroke-width="1.5"/>
-          </svg>
+          <img src="scopehound_logo.png" alt="ScopeHound">
         </div>
         <span class="nav-wordmark">ScopeHound</span>
       </a>
@@ -855,7 +857,7 @@
         <li><a href="#operations">How It Works</a></li>
         <li><a href="#pricing">Pricing</a></li>
         <li><a href="#deploy" class="btn btn-secondary" style="padding:8px 18px;">Deploy</a></li>
-        <li><a href="#" class="disabled" onclick="return false;">Sign In<span class="nav-coming-soon">COMING SOON</span></a></li>
+        <li><a href="/signin">Sign In</a></li>
       </ul>
     </div>
   </nav>
@@ -863,9 +865,9 @@
   <!-- ============ HERO ============ -->
   <section class="hero" id="hero">
     <div class="container">
-      <h1 class="hero-headline">Competitive Intelligence.<br>Automated. Analyzed. Delivered.</h1>
-      <p class="hero-subtitle">Your competitors just changed their pricing.<br>You'll know in the morning.</p>
-      <p class="hero-desc">Open-source AI agent that monitors competitor pricing, features, SEO, blogs, and Product Hunt launches. Runs on Cloudflare Workers. $0 to self-host.</p>
+      <h1 class="hero-headline">Your competitors changed<br>their pricing last night.<br>Check Slack.</h1>
+      <p class="hero-subtitle">ScopeHound watches your competitors 24/7 and drops an AI-analyzed briefing into Slack every morning.</p>
+      <p class="hero-desc">Pricing changes, feature updates, SEO shifts, blog posts, Product Hunt launches — monitored, analyzed, and delivered with what changed, why it matters, and what to do about it. Open source. $0 to self-host.</p>
       <div class="hero-actions">
         <a href="#deploy" class="btn btn-primary">Deploy Free</a>
         <a href="#field-report" class="btn btn-secondary">View Live Demo</a>
@@ -932,7 +934,7 @@
         <div class="ops-step">
           <div class="ops-number">03</div>
           <div class="ops-title">Monitor</div>
-          <p class="ops-desc">ScopeHound checks competitors daily. Prioritized intelligence delivered to Slack when changes are detected.</p>
+          <p class="ops-desc">ScopeHound checks competitors daily. When something changes, you get an AI-analyzed briefing in Slack — prioritized, actionable, before your coffee.</p>
         </div>
       </div>
     </div>
@@ -1017,7 +1019,7 @@
             <li>Basic AI analysis</li>
             <li>Slack alerts</li>
           </ul>
-          <a href="#" class="btn btn-secondary">Get Started</a>
+          <a href="/signin" class="btn btn-secondary">Get Started</a>
         </div>
         <!-- Operator -->
         <div class="pricing-card highlighted">
@@ -1034,7 +1036,7 @@
             <li>Full AI analysis + priority alerts</li>
             <li>Slack alerts</li>
           </ul>
-          <a href="#" class="btn btn-primary">Start Operating</a>
+          <a href="/signin" class="btn btn-primary">Start Operating</a>
         </div>
         <!-- Commander -->
         <div class="pricing-card">
@@ -1052,12 +1054,12 @@
             <li>Slack + email alerts</li>
             <li>API access</li>
           </ul>
-          <a href="#" class="btn btn-secondary">Take Command</a>
+          <a href="/signin" class="btn btn-secondary">Take Command</a>
         </div>
       </div>
       <div class="pricing-enterprise">
         <div class="pricing-enterprise-text"><strong>Strategic</strong> &mdash; <span class="price">$199/mo</span> &mdash; 50 competitors, 4x daily scans, unlimited users, dedicated support.</div>
-        <a href="#" class="btn btn-tan">Contact Us</a>
+        <a href="/signin" class="btn btn-tan">Contact Us</a>
       </div>
     </div>
     <div class="container"><div class="section-divider"></div></div>
@@ -1087,7 +1089,7 @@
             <div class="partner-tier-total">$2,388 total over 24 months</div>
           </div>
         </div>
-        <a href="#" class="btn btn-tan">Become a Partner</a>
+        <a href="/partner/apply" class="btn btn-tan">Become a Partner</a>
       </div>
     </div>
   </section>
@@ -1097,7 +1099,7 @@
     <div class="container footer-inner">
       <div class="footer-links">
         <span class="footer-brand">ScopeHound</span>
-        <a href="#" class="footer-link">GitHub</a>
+        <a href="https://github.com/ZeroLupo/scopehound" class="footer-link">GitHub</a>
         <a href="#" class="footer-link">Docs</a>
         <a href="#" class="footer-link">MIT License</a>
       </div>

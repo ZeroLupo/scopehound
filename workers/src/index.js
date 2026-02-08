@@ -20,12 +20,26 @@ const DEFAULT_ANNOUNCEMENT_KEYWORDS = {
   product: ["launch", "launching", "introduces", "announcing", "new feature", "now available", "release"],
 };
 
+// ─── TIER DEFINITIONS ────────────────────────────────────────────────────────
+
+const TIERS = {
+  recon:     { name: "Recon",     price: 0,   competitors: 3,  pages: 6,   scansPerDay: 1, historyDays: 30 },
+  operator:  { name: "Operator",  price: 49,  competitors: 15, pages: 60,  scansPerDay: 1, historyDays: 90 },
+  commander: { name: "Commander", price: 99,  competitors: 25, pages: 100, scansPerDay: 2, historyDays: 365 },
+  strategic: { name: "Strategic", price: 199, competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
+};
+
+function getTierLimits(tier) {
+  return TIERS[tier] || TIERS.recon;
+}
+
 // ─── CONFIG LOADER ───────────────────────────────────────────────────────────
 
-async function loadConfig(env) {
+async function loadConfig(env, userId) {
+  const prefix = userId ? `user_config:${userId}:` : "config:";
   const [compRaw, settRaw] = await Promise.all([
-    env.STATE.get("config:competitors"),
-    env.STATE.get("config:settings"),
+    env.STATE.get(prefix + "competitors"),
+    env.STATE.get(prefix + "settings"),
   ]);
   const competitors = compRaw ? JSON.parse(compRaw) : [];
   const settings = settRaw ? JSON.parse(settRaw) : {};
@@ -753,6 +767,407 @@ function jsonResponse(data, status = 200) {
   });
 }
 
+// ─── MODE DETECTION ─────────────────────────────────────────────────────────
+
+function isHostedMode(env) {
+  return !!(env.GOOGLE_CLIENT_ID && env.STRIPE_SECRET_KEY && env.JWT_SECRET);
+}
+
+async function resolveAuth(request, env) {
+  if (isHostedMode(env)) {
+    const user = await getSessionUser(request, env);
+    if (!user) {
+      return { user: null, response: new Response(JSON.stringify({ error: "Not authenticated" }), {
+        status: 401, headers: { "Content-Type": "application/json" },
+      })};
+    }
+    return { user, response: null };
+  }
+  const authErr = requireAuth(request, env);
+  if (authErr) return { user: null, response: authErr };
+  return { user: { id: "admin", tier: "strategic", email: "admin" }, response: null };
+}
+
+// ─── JWT SESSION MANAGEMENT ─────────────────────────────────────────────────
+
+function base64urlEncode(data) {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64urlDecode(str) {
+  const padded = str + "=".repeat((4 - (str.length % 4)) % 4);
+  const binary = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function generateJWT(payload, secret) {
+  const encoder = new TextEncoder();
+  const header = base64urlEncode(encoder.encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
+  const body = base64urlEncode(encoder.encode(JSON.stringify(payload)));
+  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(header + "." + body));
+  return header + "." + body + "." + base64urlEncode(sig);
+}
+
+async function verifyJWT(token, secret) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const valid = await crypto.subtle.verify("HMAC", key, base64urlDecode(parts[2]), encoder.encode(parts[0] + "." + parts[1]));
+    if (!valid) return null;
+    const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(parts[1])));
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function createSession(env, userId) {
+  const payload = { sub: userId, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 30 * 86400 };
+  return await generateJWT(payload, env.JWT_SECRET);
+}
+
+async function getSessionUser(request, env) {
+  if (!env.JWT_SECRET) return null;
+  const cookies = request.headers.get("Cookie") || "";
+  const match = cookies.match(/sh_session=([^;]+)/);
+  if (!match) return null;
+  const payload = await verifyJWT(match[1], env.JWT_SECRET);
+  if (!payload || !payload.sub) return null;
+  try {
+    const raw = await env.STATE.get("user:" + payload.sub);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function setSessionCookie(headers, token) {
+  headers.append("Set-Cookie", `sh_session=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`);
+}
+
+function clearSessionCookie(headers) {
+  headers.append("Set-Cookie", "sh_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+}
+
+// ─── OAUTH PROVIDERS ────────────────────────────────────────────────────────
+
+function getGoogleAuthUrl(env, origin, state) {
+  const params = new URLSearchParams({
+    client_id: env.GOOGLE_CLIENT_ID,
+    redirect_uri: origin + "/auth/google/callback",
+    response_type: "code",
+    scope: "openid email profile",
+    state: state,
+    prompt: "select_account",
+  });
+  return "https://accounts.google.com/o/oauth2/v2/auth?" + params.toString();
+}
+
+async function exchangeGoogleCode(code, redirectUri, env) {
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: env.GOOGLE_CLIENT_ID,
+      client_secret: env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: redirectUri,
+    }).toString(),
+  });
+  if (!r.ok) return null;
+  return await r.json();
+}
+
+async function getGoogleUserInfo(accessToken) {
+  const r = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+    headers: { Authorization: "Bearer " + accessToken },
+  });
+  if (!r.ok) return null;
+  return await r.json();
+}
+
+async function findOrCreateUser(env, provider, profile, refCode) {
+  // Check if user exists by email
+  const existingId = await env.STATE.get("user_email:" + profile.email);
+  if (existingId) {
+    const raw = await env.STATE.get("user:" + existingId);
+    if (raw) return JSON.parse(raw);
+  }
+  // Create new user
+  const id = crypto.randomUUID();
+  const user = {
+    id,
+    email: profile.email,
+    name: profile.name || profile.email.split("@")[0],
+    picture: profile.picture || null,
+    provider,
+    providerId: profile.id,
+    tier: "recon",
+    stripeCustomerId: null,
+    stripeSubscriptionId: null,
+    subscriptionStatus: null,
+    referredBy: refCode || null,
+    createdAt: new Date().toISOString(),
+  };
+  await Promise.all([
+    env.STATE.put("user:" + id, JSON.stringify(user)),
+    env.STATE.put("user_email:" + profile.email, id),
+  ]);
+  // Record affiliate signup if referred
+  if (refCode) {
+    await recordAffiliateSignup(env, refCode, user);
+  }
+  return user;
+}
+
+// ─── STRIPE INTEGRATION ─────────────────────────────────────────────────────
+
+async function stripeAPI(path, method, body, env) {
+  const r = await fetch("https://api.stripe.com/v1" + path, {
+    method,
+    headers: {
+      Authorization: "Bearer " + env.STRIPE_SECRET_KEY,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body ? new URLSearchParams(body).toString() : undefined,
+  });
+  return await r.json();
+}
+
+async function verifyStripeSignature(rawBody, sigHeader, secret) {
+  try {
+    const parts = {};
+    for (const item of sigHeader.split(",")) {
+      const [key, value] = item.split("=");
+      parts[key.trim()] = value.trim();
+    }
+    const timestamp = parts.t;
+    const signature = parts.v1;
+    if (!timestamp || !signature) return null;
+    if (Math.floor(Date.now() / 1000) - parseInt(timestamp) > 300) return null;
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(timestamp + "." + rawBody));
+    const expected = Array.from(new Uint8Array(mac)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    if (expected.length !== signature.length) return null;
+    let result = 0;
+    for (let i = 0; i < expected.length; i++) result |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+    if (result !== 0) return null;
+    return JSON.parse(rawBody);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function createCheckoutSession(env, user, tier, origin) {
+  const tierDef = TIERS[tier];
+  if (!tierDef || tierDef.price === 0) return null;
+  const priceIds = env.STRIPE_PRICE_IDS ? JSON.parse(env.STRIPE_PRICE_IDS) : {};
+  const priceId = priceIds[tier];
+  if (!priceId) return null;
+  const params = {
+    mode: "subscription",
+    "line_items[0][price]": priceId,
+    "line_items[0][quantity]": "1",
+    success_url: origin + "/billing?success=1",
+    cancel_url: origin + "/billing",
+    "metadata[user_id]": user.id,
+    "metadata[tier]": tier,
+    "subscription_data[metadata][user_id]": user.id,
+    "subscription_data[metadata][tier]": tier,
+  };
+  if (user.stripeCustomerId) {
+    params.customer = user.stripeCustomerId;
+  } else {
+    params.customer_email = user.email;
+  }
+  if (user.referredBy) {
+    params["subscription_data[metadata][affiliate_code]"] = user.referredBy;
+  }
+  return await stripeAPI("/checkout/sessions", "POST", params, env);
+}
+
+async function handleStripeWebhook(event, env) {
+  // Idempotency check
+  const eventKey = "processed_events:" + event.id;
+  const already = await env.STATE.get(eventKey);
+  if (already) return;
+  await env.STATE.put(eventKey, "1", { expirationTtl: 86400 });
+
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const session = event.data.object;
+      const userId = session.metadata?.user_id;
+      const tier = session.metadata?.tier;
+      if (!userId || !tier) break;
+      const raw = await env.STATE.get("user:" + userId);
+      if (!raw) break;
+      const user = JSON.parse(raw);
+      user.tier = tier;
+      user.stripeCustomerId = session.customer;
+      user.stripeSubscriptionId = session.subscription;
+      user.subscriptionStatus = "active";
+      await Promise.all([
+        env.STATE.put("user:" + userId, JSON.stringify(user)),
+        env.STATE.put("sub:" + session.subscription, userId),
+        env.STATE.put("stripe_customer:" + session.customer, userId),
+      ]);
+      // Record affiliate commission on first payment
+      const affCode = session.metadata?.affiliate_code || user.referredBy;
+      if (affCode) {
+        await recordAffiliateCommission(env, affCode, userId, TIERS[tier].price * 100, tier);
+      }
+      break;
+    }
+    case "customer.subscription.updated": {
+      const sub = event.data.object;
+      const userId = await env.STATE.get("sub:" + sub.id);
+      if (!userId) break;
+      const raw = await env.STATE.get("user:" + userId);
+      if (!raw) break;
+      const user = JSON.parse(raw);
+      const newTier = sub.metadata?.tier || user.tier;
+      user.tier = newTier;
+      user.subscriptionStatus = sub.status;
+      await env.STATE.put("user:" + userId, JSON.stringify(user));
+      break;
+    }
+    case "customer.subscription.deleted": {
+      const sub = event.data.object;
+      const userId = await env.STATE.get("sub:" + sub.id);
+      if (!userId) break;
+      const raw = await env.STATE.get("user:" + userId);
+      if (!raw) break;
+      const user = JSON.parse(raw);
+      user.tier = "recon";
+      user.subscriptionStatus = "canceled";
+      user.stripeSubscriptionId = null;
+      await env.STATE.put("user:" + userId, JSON.stringify(user));
+      break;
+    }
+    case "invoice.payment_succeeded": {
+      const invoice = event.data.object;
+      const subId = invoice.subscription;
+      if (!subId) break;
+      const userId = await env.STATE.get("sub:" + subId);
+      if (!userId) break;
+      const raw = await env.STATE.get("user:" + userId);
+      if (!raw) break;
+      const user = JSON.parse(raw);
+      if (user.referredBy) {
+        await recordAffiliateCommission(env, user.referredBy, userId, invoice.amount_paid, user.tier);
+      }
+      break;
+    }
+    case "invoice.payment_failed": {
+      const invoice = event.data.object;
+      const subId = invoice.subscription;
+      if (!subId) break;
+      const userId = await env.STATE.get("sub:" + subId);
+      if (!userId) break;
+      const raw = await env.STATE.get("user:" + userId);
+      if (!raw) break;
+      const user = JSON.parse(raw);
+      user.subscriptionStatus = "past_due";
+      await env.STATE.put("user:" + userId, JSON.stringify(user));
+      break;
+    }
+  }
+}
+
+// ─── TIER ENFORCEMENT ───────────────────────────────────────────────────────
+
+function enforceTierLimits(user, competitors) {
+  const limits = getTierLimits(user?.tier || "recon");
+  if (competitors.length > limits.competitors) {
+    return { error: `Your ${limits.name} plan allows ${limits.competitors} competitors. Upgrade at /billing.` };
+  }
+  const totalPages = competitors.reduce((n, c) => n + (c.pages?.length || 0), 0);
+  if (totalPages > limits.pages) {
+    return { error: `Your ${limits.name} plan allows ${limits.pages} pages. Upgrade at /billing.` };
+  }
+  return null;
+}
+
+// ─── AFFILIATE TRACKING ─────────────────────────────────────────────────────
+
+function generateAffiliateCode() {
+  return crypto.randomUUID().slice(0, 8);
+}
+
+function maskEmail(email) {
+  if (!email) return "***";
+  const [local, domain] = email.split("@");
+  return local[0] + "***@" + domain;
+}
+
+async function recordAffiliateSignup(env, code, user) {
+  try {
+    const raw = await env.STATE.get("affiliate:" + code);
+    if (!raw) return;
+    const affiliate = JSON.parse(raw);
+    if (affiliate.status !== "approved" && affiliate.status !== "active") return;
+    affiliate.referralCount = (affiliate.referralCount || 0) + 1;
+    affiliate.status = "active";
+    await env.STATE.put("affiliate:" + code, JSON.stringify(affiliate));
+    // Add to referrals list
+    const refsRaw = await env.STATE.get("affiliate:" + code + ":referrals");
+    const refs = refsRaw ? JSON.parse(refsRaw) : [];
+    refs.push({
+      userId: user.id,
+      email: maskEmail(user.email),
+      signedUpAt: new Date().toISOString(),
+      tier: user.tier,
+      monthlyCommission: 0,
+      totalPaid: 0,
+      monthsRemaining: 24,
+      status: "active",
+    });
+    await env.STATE.put("affiliate:" + code + ":referrals", JSON.stringify(refs));
+  } catch (e) {
+    console.log("Affiliate signup error: " + e.message);
+  }
+}
+
+async function recordAffiliateCommission(env, code, userId, amountCents, tier) {
+  try {
+    const raw = await env.STATE.get("affiliate:" + code);
+    if (!raw) return;
+    const affiliate = JSON.parse(raw);
+    const commission = Math.round(amountCents * (affiliate.commissionRate || 0.5));
+    affiliate.totalEarnings = (affiliate.totalEarnings || 0) + commission;
+    affiliate.pendingEarnings = (affiliate.pendingEarnings || 0) + commission;
+    await env.STATE.put("affiliate:" + code, JSON.stringify(affiliate));
+    // Update referral entry
+    const refsRaw = await env.STATE.get("affiliate:" + code + ":referrals");
+    if (refsRaw) {
+      const refs = JSON.parse(refsRaw);
+      const ref = refs.find((r) => r.userId === userId);
+      if (ref) {
+        ref.monthlyCommission = commission;
+        ref.totalPaid = (ref.totalPaid || 0) + commission;
+        ref.monthsRemaining = Math.max(0, (ref.monthsRemaining || 24) - 1);
+        ref.tier = tier;
+        if (ref.monthsRemaining <= 0) ref.status = "completed";
+      }
+      await env.STATE.put("affiliate:" + code + ":referrals", JSON.stringify(refs));
+    }
+  } catch (e) {
+    console.log("Affiliate commission error: " + e.message);
+  }
+}
+
 // ─── DASHBOARD HTML ──────────────────────────────────────────────────────────
 
 const DASHBOARD_HTML = `<!DOCTYPE html>
@@ -1080,6 +1495,238 @@ if(comps.length===0)addComp();
 </body>
 </html>`;
 
+// ─── SIGN-IN HTML (hosted mode) ──────────────────────────────────────────────
+
+const SIGNIN_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ScopeHound — Sign In</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:40px 32px;width:100%;max-width:380px;text-align:center}
+h1{font-size:22px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px}
+h1 span{color:#5c6b3c}
+.sub{color:#6b7280;font-size:14px;margin-bottom:32px}
+.btn-google{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:12px;background:#fff;color:#333;border:none;border-radius:2px;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:12px;text-decoration:none}
+.btn-google:hover{background:#f0f0f0}
+.btn-apple{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:12px;background:#000;color:#fff;border:1px solid #333;border-radius:2px;font-size:14px;font-weight:600;cursor:default;opacity:0.4;position:relative;margin-bottom:24px}
+.btn-apple .soon{position:absolute;right:12px;font-size:9px;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280}
+.footer{font-size:12px;color:#6b7280}
+.footer a{color:#7a8c52}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Scope<span>Hound</span></h1>
+<p class="sub">Sign in to your intelligence dashboard</p>
+<a href="/auth/google" class="btn-google"><svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>Continue with Google</a>
+<div class="btn-apple"><svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M17.05 20.28c-.98.95-2.05.88-3.08.4-1.09-.5-2.08-.48-3.24 0-1.44.62-2.2.44-3.06-.4C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.32 2.32-1.95 4.27-3.74 4.25z"/></svg>Continue with Apple<span class="soon">Soon</span></div>
+<div class="footer">Want full control? <a href="https://github.com/ZeroLupo/scopehound">Self-host for free</a></div>
+</div>
+</body>
+</html>`;
+
+// ─── BILLING HTML (hosted mode) ─────────────────────────────────────────────
+
+const BILLING_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ScopeHound — Billing</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
+a{color:#7a8c52;text-decoration:none}
+header{background:#12161a;border-bottom:1px solid #2a3038;padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+header h1{font-size:18px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em}
+header h1 span{color:#5c6b3c}
+.wrap{max-width:900px;margin:0 auto;padding:32px 24px}
+h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:20px}
+.current{background:#12161a;border:1px solid #5c6b3c;border-radius:2px;padding:20px;margin-bottom:32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+.current-plan{font-size:18px;font-weight:700;text-transform:uppercase}
+.current-status{font-size:12px;color:#3d6b35;text-transform:uppercase;letter-spacing:0.05em}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.plan{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:20px;display:flex;flex-direction:column}
+.plan.active{border-color:#5c6b3c}
+.plan-name{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px}
+.plan-price{font-size:24px;font-weight:700;margin-bottom:4px}
+.plan-price .mo{font-size:12px;color:#6b7280;font-weight:400}
+.plan-features{list-style:none;margin:12px 0;flex:1}
+.plan-features li{font-size:12px;color:#6b7280;padding:3px 0;border-bottom:1px solid #1a1f25}
+.plan-features li:last-child{border-bottom:none}
+.btn{display:block;width:100%;padding:10px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;text-align:center;cursor:pointer;border:none;border-radius:2px}
+.btn-primary{background:#5c6b3c;color:#d4d8de}
+.btn-primary:hover{background:#7a8c52}
+.btn-secondary{background:transparent;border:1px solid #2a3038;color:#6b7280}
+.btn-secondary:hover{border-color:#5c6b3c;color:#d4d8de}
+.btn-current{background:#1a1f25;color:#6b7280;cursor:default}
+.manage{text-align:center;margin-top:24px;font-size:13px;color:#6b7280}
+.msg{padding:8px 12px;border-radius:2px;font-size:13px;margin-bottom:16px}
+.msg-ok{background:#3d6b3522;border:1px solid #3d6b35;color:#3d6b35}
+@media(max-width:700px){.grid{grid-template-columns:1fr 1fr}.current{flex-direction:column;align-items:flex-start}}
+@media(max-width:480px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1>Scope<span>Hound</span></h1><a href="/dashboard">Dashboard</a></header>
+<div class="wrap">
+<div id="successMsg"></div>
+<div class="current" id="currentPlan"><div><div class="current-plan" id="planName">Loading...</div><div class="current-status" id="planStatus"></div></div></div>
+<h2>Plans</h2>
+<div class="grid">
+<div class="plan" data-tier="recon"><div class="plan-name">Recon</div><div class="plan-price">$0<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Daily scans</li><li>30-day history</li></ul><button class="btn btn-secondary" id="btn-recon">Current Plan</button></div>
+<div class="plan" data-tier="operator"><div class="plan-name">Operator</div><div class="plan-price">$49<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>Daily scans</li><li>90-day history</li><li>3 users</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Upgrade</button></div>
+<div class="plan" data-tier="commander"><div class="plan-name">Commander</div><div class="plan-price">$99<span class="mo">/mo</span></div><ul class="plan-features"><li>25 competitors</li><li>100 pages</li><li>2x daily</li><li>1-year history</li><li>10 users</li></ul><button class="btn btn-primary" id="btn-commander" onclick="checkout('commander')">Upgrade</button></div>
+<div class="plan" data-tier="strategic"><div class="plan-name">Strategic</div><div class="plan-price">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>4x daily</li><li>Unlimited history</li><li>Unlimited users</li></ul><button class="btn btn-primary" id="btn-strategic" onclick="checkout('strategic')">Upgrade</button></div>
+</div>
+<div class="manage" id="manageSection" style="display:none"><a href="#" onclick="manageSubscription();return false">Manage subscription on Stripe</a></div>
+</div>
+<script>
+async function loadProfile(){
+  try{const r=await fetch("/api/user/profile");if(!r.ok)return;const u=await r.json();
+  document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"RECON PLAN";
+  document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"Free";
+  const tier=u.tier||"recon";
+  document.querySelectorAll(".plan").forEach(p=>{const t=p.dataset.tier;const btn=p.querySelector("button");
+  if(t===tier){p.classList.add("active");btn.className="btn btn-current";btn.textContent="Current Plan";btn.onclick=null;}
+  else if(["operator","commander","strategic"].indexOf(t)>["operator","commander","strategic"].indexOf(tier)){btn.textContent="Upgrade";btn.className="btn btn-primary";}
+  else{btn.textContent="Downgrade";btn.className="btn btn-secondary";}});
+  if(u.stripeCustomerId)document.getElementById("manageSection").style.display="block";
+  }catch(e){}
+  if(new URLSearchParams(location.search).get("success"))document.getElementById("successMsg").innerHTML='<div class="msg msg-ok">Subscription activated! Your plan has been upgraded.</div>';
+}
+async function checkout(tier){try{const r=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
+async function manageSubscription(){try{const r=await fetch("/api/billing/portal",{method:"POST"});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
+loadProfile();
+</script>
+</body>
+</html>`;
+
+// ─── PARTNER APPLICATION HTML (hosted mode) ──────────────────────────────────
+
+const PARTNER_APPLY_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ScopeHound — Partner Program</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
+a{color:#7a8c52}
+.wrap{max-width:520px;margin:0 auto;padding:32px 20px}
+h1{font-size:22px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px}
+h1 span{color:#5c6b3c}
+.sub{color:#6b7280;font-size:14px;margin-bottom:8px}
+.highlight{color:#c4a747;font-size:18px;font-weight:700;margin-bottom:24px}
+.panel{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:24px;margin-bottom:16px}
+label{display:block;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#6b7280;margin-bottom:6px}
+input,textarea{width:100%;background:#0a0c0e;border:1px solid #2a3038;color:#d4d8de;padding:10px 12px;font-size:14px;border-radius:2px;outline:none;font-family:inherit}
+input:focus,textarea:focus{border-color:#5c6b3c}
+textarea{resize:vertical;min-height:60px}
+.field{margin-bottom:16px}
+.btn{display:inline-block;padding:12px 24px;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer;border:none;border-radius:2px;background:#c4a747;color:#0a0c0e}
+.btn:hover{background:#d4b857}
+.msg{padding:8px 12px;border-radius:2px;font-size:13px;margin-top:12px}
+.msg-ok{background:#3d6b3522;border:1px solid #3d6b35;color:#3d6b35}
+.msg-err{background:#c2303022;border:1px solid #c23030;color:#c23030}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Scope<span>Hound</span></h1>
+<p class="sub">Partner Program</p>
+<p class="highlight">Earn 50% recurring for 24 months</p>
+<div class="panel">
+<div class="field"><label>Your Name</label><input type="text" id="pName" required></div>
+<div class="field"><label>Email</label><input type="email" id="pEmail" required></div>
+<div class="field"><label>Website or Social Profile</label><input type="url" id="pWebsite" placeholder="https://"></div>
+<div class="field"><label>PayPal Email (for payouts)</label><input type="email" id="pPaypal" required></div>
+<div class="field"><label>How will you promote ScopeHound?</label><textarea id="pHow" placeholder="Blog, newsletter, YouTube, Twitter, etc."></textarea></div>
+<button class="btn" onclick="apply()">Apply Now</button>
+<div id="applyMsg"></div>
+</div>
+</div>
+<script>
+async function apply(){
+  const body={name:document.getElementById("pName").value,email:document.getElementById("pEmail").value,website:document.getElementById("pWebsite").value,paypalEmail:document.getElementById("pPaypal").value,promotionPlan:document.getElementById("pHow").value};
+  if(!body.name||!body.email||!body.paypalEmail){document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">Name, email, and PayPal email are required.</div>';return;}
+  try{const r=await fetch("/api/partner/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const d=await r.json();
+  if(d.success)document.getElementById("applyMsg").innerHTML='<div class="msg msg-ok">Application submitted! Your referral code: <strong>'+d.code+'</strong>. We will review and activate your account shortly.</div>';
+  else document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">'+(d.error||"Failed")+'</div>';
+  }catch(e){document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
+}
+</script>
+</body>
+</html>`;
+
+// ─── PARTNER DASHBOARD HTML (hosted mode) ────────────────────────────────────
+
+const PARTNER_DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ScopeHound — Partner Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
+a{color:#7a8c52}
+.wrap{max-width:800px;margin:0 auto;padding:32px 20px}
+h1{font-size:22px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px}
+h1 span{color:#5c6b3c}
+.sub{color:#6b7280;font-size:14px;margin-bottom:24px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.stat{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:16px}
+.stat-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#6b7280;margin-bottom:4px}
+.stat-value{font-size:22px;font-weight:700;color:#c4a747}
+.link-box{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:16px;margin-bottom:24px;display:flex;gap:8px;align-items:center}
+.link-box input{flex:1;background:#0a0c0e;border:1px solid #2a3038;color:#d4d8de;padding:8px 12px;font-size:13px;border-radius:2px}
+.link-box button{padding:8px 16px;background:#5c6b3c;color:#d4d8de;border:none;border-radius:2px;font-size:12px;font-weight:600;text-transform:uppercase;cursor:pointer}
+table{width:100%;border-collapse:collapse;background:#12161a;border:1px solid #2a3038;border-radius:2px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1a1f25;font-size:13px}
+th{color:#6b7280;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.05em}
+.empty{text-align:center;padding:32px;color:#6b7280}
+@media(max-width:600px){.stats{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Scope<span>Hound</span></h1>
+<p class="sub">Partner Dashboard</p>
+<div class="stats">
+<div class="stat"><div class="stat-label">Referrals</div><div class="stat-value" id="sReferrals">-</div></div>
+<div class="stat"><div class="stat-label">Active Subs</div><div class="stat-value" id="sActive">-</div></div>
+<div class="stat"><div class="stat-label">Monthly Earnings</div><div class="stat-value" id="sMonthly">-</div></div>
+<div class="stat"><div class="stat-label">Total Earned</div><div class="stat-value" id="sTotal">-</div></div>
+</div>
+<div class="link-box"><label style="font-size:11px;font-weight:600;text-transform:uppercase;color:#6b7280;white-space:nowrap">Referral Link</label><input type="text" id="refLink" readonly><button onclick="navigator.clipboard.writeText(document.getElementById('refLink').value)">Copy</button></div>
+<h2 style="font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Referrals</h2>
+<table><thead><tr><th>Email</th><th>Date</th><th>Tier</th><th>Commission</th><th>Status</th></tr></thead><tbody id="refTable"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody></table>
+</div>
+<script>
+const params=new URLSearchParams(location.search);
+const code=params.get("code"),email=params.get("email");
+if(!code||!email){document.querySelector(".wrap").innerHTML='<p style="color:#c23030;padding:40px;text-align:center">Missing code or email parameter.</p>';}
+else{fetch("/api/partner/stats?code="+code+"&email="+email).then(r=>r.json()).then(d=>{
+  if(d.error){document.querySelector(".wrap").innerHTML='<p style="color:#c23030;padding:40px;text-align:center">'+d.error+'</p>';return;}
+  document.getElementById("sReferrals").textContent=d.referralCount||0;
+  document.getElementById("sActive").textContent=(d.referrals||[]).filter(r=>r.status==="active").length;
+  document.getElementById("sMonthly").textContent="$"+((d.referrals||[]).reduce((s,r)=>s+(r.status==="active"?r.monthlyCommission:0),0)/100).toFixed(2);
+  document.getElementById("sTotal").textContent="$"+((d.totalEarnings||0)/100).toFixed(2);
+  document.getElementById("refLink").value=location.origin+"/?ref="+code;
+  const tbody=document.getElementById("refTable");
+  if(!d.referrals||d.referrals.length===0){tbody.innerHTML='<tr><td colspan="5" class="empty">No referrals yet</td></tr>';return;}
+  tbody.innerHTML=d.referrals.map(r=>'<tr><td>'+r.email+'</td><td>'+new Date(r.signedUpAt).toLocaleDateString()+'</td><td>'+r.tier+'</td><td>$'+(r.monthlyCommission/100).toFixed(2)+'/mo</td><td>'+r.status+'</td></tr>').join("");
+}).catch(()=>{});}
+</script>
+</body>
+</html>`;
+
 // ─── WORKER ENTRY POINT ─────────────────────────────────────────────────────
 
 export default {
@@ -1098,6 +1745,177 @@ export default {
       });
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // HOSTED MODE ROUTES — only active when Google/Stripe/JWT secrets are set
+    // ══════════════════════════════════════════════════════════════════════════
+
+    if (isHostedMode(env)) {
+      // ── Sign-in page ──
+      if (path === "/signin" || path === "/signin/") {
+        return new Response(SIGNIN_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      }
+
+      // ── Google OAuth: start ──
+      if (path === "/auth/google") {
+        const nonce = crypto.randomUUID();
+        const ref = url.searchParams.get("ref") || "";
+        const state = JSON.stringify({ nonce, ref });
+        await env.STATE.put("csrf:" + nonce, "1", { expirationTtl: 600 });
+        return Response.redirect(getGoogleAuthUrl(env, url.origin, state), 302);
+      }
+
+      // ── Google OAuth: callback ──
+      if (path === "/auth/google/callback") {
+        try {
+          const code = url.searchParams.get("code");
+          const stateRaw = url.searchParams.get("state");
+          if (!code || !stateRaw) return new Response("Missing code or state", { status: 400 });
+          const state = JSON.parse(stateRaw);
+          const csrfValid = await env.STATE.get("csrf:" + state.nonce);
+          if (!csrfValid) return new Response("Invalid or expired state", { status: 400 });
+          await env.STATE.delete("csrf:" + state.nonce);
+          const tokens = await exchangeGoogleCode(code, url.origin + "/auth/google/callback", env);
+          if (!tokens || !tokens.access_token) return new Response("Token exchange failed", { status: 400 });
+          const profile = await getGoogleUserInfo(tokens.access_token);
+          if (!profile || !profile.email) return new Response("Failed to get user info", { status: 400 });
+          const user = await findOrCreateUser(env, "google", profile, state.ref || null);
+          const token = await createSession(env, user.id);
+          const headers = new Headers({ Location: url.origin + "/dashboard" });
+          setSessionCookie(headers, token);
+          return new Response(null, { status: 302, headers });
+        } catch (e) {
+          return new Response("Auth error: " + e.message, { status: 500 });
+        }
+      }
+
+      // ── Logout ──
+      if (path === "/auth/logout") {
+        const headers = new Headers({ Location: url.origin + "/" });
+        clearSessionCookie(headers);
+        return new Response(null, { status: 302, headers });
+      }
+
+      // ── User profile ──
+      if (path === "/api/user/profile") {
+        const { user, response } = await resolveAuth(request, env);
+        if (response) return response;
+        return jsonResponse({ id: user.id, email: user.email, name: user.name, tier: user.tier, subscriptionStatus: user.subscriptionStatus, stripeCustomerId: user.stripeCustomerId });
+      }
+
+      // ── Stripe webhook (no user auth — signature verified) ──
+      if (path === "/api/stripe/webhook" && request.method === "POST") {
+        const rawBody = await request.text();
+        const sigHeader = request.headers.get("Stripe-Signature");
+        if (!sigHeader) return new Response("Missing signature", { status: 400 });
+        const event = await verifyStripeSignature(rawBody, sigHeader, env.STRIPE_WEBHOOK_SECRET);
+        if (!event) return new Response("Invalid signature", { status: 400 });
+        await handleStripeWebhook(event, env);
+        return new Response("ok", { status: 200 });
+      }
+
+      // ── Checkout ──
+      if (path === "/api/checkout" && request.method === "POST") {
+        const { user, response } = await resolveAuth(request, env);
+        if (response) return response;
+        try {
+          const body = await request.json();
+          const tier = body.tier;
+          if (!tier || !TIERS[tier] || TIERS[tier].price === 0) return jsonResponse({ error: "Invalid tier" }, 400);
+          const session = await createCheckoutSession(env, user, tier, url.origin);
+          if (!session || !session.url) return jsonResponse({ error: session?.error?.message || "Failed to create checkout" }, 400);
+          return jsonResponse({ url: session.url });
+        } catch (e) {
+          return jsonResponse({ error: e.message }, 400);
+        }
+      }
+
+      // ── Billing page ──
+      if (path === "/billing" || path === "/billing/") {
+        const user = await getSessionUser(request, env);
+        if (!user) return Response.redirect(url.origin + "/signin", 302);
+        return new Response(BILLING_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      }
+
+      // ── Billing portal ──
+      if (path === "/api/billing/portal" && request.method === "POST") {
+        const { user, response } = await resolveAuth(request, env);
+        if (response) return response;
+        if (!user.stripeCustomerId) return jsonResponse({ error: "No subscription found" }, 400);
+        const session = await stripeAPI("/billing_portal/sessions", "POST", { customer: user.stripeCustomerId, return_url: url.origin + "/billing" }, env);
+        if (!session || !session.url) return jsonResponse({ error: "Failed to create portal" }, 400);
+        return jsonResponse({ url: session.url });
+      }
+
+      // ── Partner: apply page ──
+      if (path === "/partner/apply" || path === "/partner/apply/") {
+        return new Response(PARTNER_APPLY_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      }
+
+      // ── Partner: submit application ──
+      if (path === "/api/partner/apply" && request.method === "POST") {
+        try {
+          const body = await request.json();
+          if (!body.name || !body.email || !body.paypalEmail) return jsonResponse({ error: "Name, email, and PayPal email required" }, 400);
+          const existing = await env.STATE.get("affiliate_email:" + body.email);
+          if (existing) return jsonResponse({ error: "Application already submitted" }, 400);
+          const code = generateAffiliateCode();
+          const affiliate = {
+            code,
+            email: body.email,
+            name: body.name,
+            website: body.website || null,
+            paypalEmail: body.paypalEmail,
+            promotionPlan: body.promotionPlan || null,
+            status: "approved",
+            commissionRate: 0.5,
+            commissionMonths: 24,
+            referralCount: 0,
+            totalEarnings: 0,
+            pendingEarnings: 0,
+            createdAt: new Date().toISOString(),
+            approvedAt: new Date().toISOString(),
+          };
+          await Promise.all([
+            env.STATE.put("affiliate:" + code, JSON.stringify(affiliate)),
+            env.STATE.put("affiliate_email:" + body.email, code),
+          ]);
+          return jsonResponse({ success: true, code });
+        } catch (e) {
+          return jsonResponse({ error: e.message }, 400);
+        }
+      }
+
+      // ── Partner: dashboard ──
+      if (path === "/partner/dashboard" || path === "/partner/dashboard/") {
+        return new Response(PARTNER_DASHBOARD_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      }
+
+      // ── Partner: stats API ──
+      if (path === "/api/partner/stats") {
+        const code = url.searchParams.get("code");
+        const email = url.searchParams.get("email");
+        if (!code || !email) return jsonResponse({ error: "code and email required" }, 400);
+        const raw = await env.STATE.get("affiliate:" + code);
+        if (!raw) return jsonResponse({ error: "Affiliate not found" }, 404);
+        const affiliate = JSON.parse(raw);
+        if (affiliate.email !== email) return jsonResponse({ error: "Invalid credentials" }, 401);
+        const refsRaw = await env.STATE.get("affiliate:" + code + ":referrals");
+        const referrals = refsRaw ? JSON.parse(refsRaw) : [];
+        return jsonResponse({
+          code: affiliate.code,
+          status: affiliate.status,
+          referralCount: affiliate.referralCount,
+          totalEarnings: affiliate.totalEarnings,
+          pendingEarnings: affiliate.pendingEarnings,
+          referrals,
+        });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SHARED ROUTES — work in both self-hosted and hosted mode
+    // ══════════════════════════════════════════════════════════════════════════
+
     // ── Setup wizard ──
     if (path === "/setup" || path === "/setup/") {
       return new Response(SETUP_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
@@ -1105,12 +1923,21 @@ export default {
 
     // ── Dashboard ──
     if (path === "/dashboard" || path === "/dashboard/") {
+      if (isHostedMode(env)) {
+        const user = await getSessionUser(request, env);
+        if (!user) return Response.redirect(url.origin + "/signin", 302);
+      }
       return new Response(DASHBOARD_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
     }
 
     // ── Dashboard API ──
     if (path === "/api/dashboard-data" || path === "/dashboard/api/dashboard-data") {
-      const cache = await env.STATE.get("dashboard_cache");
+      let cacheKey = "dashboard_cache";
+      if (isHostedMode(env)) {
+        const user = await getSessionUser(request, env);
+        if (user) cacheKey = "user_state:" + user.id + ":dashboard";
+      }
+      const cache = await env.STATE.get(cacheKey);
       return new Response(cache || '{"competitors":[],"recentChanges":[]}', {
         headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
       });
@@ -1118,28 +1945,36 @@ export default {
 
     // ── Config API: Read ──
     if (path === "/api/config" && request.method === "GET") {
-      const authErr = requireAuth(request, env);
-      if (authErr) return authErr;
-      const config = await loadConfig(env);
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
+      const userId = isHostedMode(env) ? user.id : null;
+      const config = await loadConfig(env, userId);
       return jsonResponse({ competitors: config.competitors, settings: config.settings });
     }
 
     // ── Config API: Save competitors ──
     if (path === "/api/config/competitors" && request.method === "POST") {
-      const authErr = requireAuth(request, env);
-      if (authErr) return authErr;
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
       try {
         const body = await request.json();
         const comps = body.competitors;
         if (!Array.isArray(comps)) return jsonResponse({ error: "competitors must be an array" }, 400);
-        if (comps.length > 25) return jsonResponse({ error: "Maximum 25 competitors" }, 400);
+        // Enforce tier limits in hosted mode
+        if (isHostedMode(env)) {
+          const tierErr = enforceTierLimits(user, comps);
+          if (tierErr) return jsonResponse(tierErr, 400);
+        } else {
+          if (comps.length > 25) return jsonResponse({ error: "Maximum 25 competitors" }, 400);
+        }
         for (const c of comps) {
-          if (!c.name || !c.website) return jsonResponse({ error: `Competitor missing name or website` }, 400);
+          if (!c.name || !c.website) return jsonResponse({ error: "Competitor missing name or website" }, 400);
           if (!c.pages || c.pages.length === 0) return jsonResponse({ error: `${c.name}: needs at least one page` }, 400);
           if (c.pages.length > 4) return jsonResponse({ error: `${c.name}: maximum 4 pages per competitor` }, 400);
         }
-        await env.STATE.put("config:competitors", JSON.stringify(comps));
-        await env.STATE.put("config:setup_complete", "true");
+        const prefix = isHostedMode(env) ? `user_config:${user.id}:` : "config:";
+        await env.STATE.put(prefix + "competitors", JSON.stringify(comps));
+        if (!isHostedMode(env)) await env.STATE.put("config:setup_complete", "true");
         return jsonResponse({ success: true, count: comps.length });
       } catch (e) {
         return jsonResponse({ error: e.message }, 400);
@@ -1148,8 +1983,8 @@ export default {
 
     // ── Config API: Save settings ──
     if (path === "/api/config/settings" && request.method === "POST") {
-      const authErr = requireAuth(request, env);
-      if (authErr) return authErr;
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
       try {
         const body = await request.json();
         const settings = {
@@ -1159,7 +1994,8 @@ export default {
           announcementKeywords: body.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS,
           phMinVotes: body.phMinVotes ?? 0,
         };
-        await env.STATE.put("config:settings", JSON.stringify(settings));
+        const prefix = isHostedMode(env) ? `user_config:${user.id}:` : "config:";
+        await env.STATE.put(prefix + "settings", JSON.stringify(settings));
         return jsonResponse({ success: true });
       } catch (e) {
         return jsonResponse({ error: e.message }, 400);
@@ -1168,8 +2004,8 @@ export default {
 
     // ── Config API: Test Slack ──
     if (path === "/api/config/test-slack" && request.method === "POST") {
-      const authErr = requireAuth(request, env);
-      if (authErr) return authErr;
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
       try {
         const body = await request.json();
         const webhookUrl = body.webhookUrl;
@@ -1183,17 +2019,18 @@ export default {
 
     // ── Config API: Trigger scan ──
     if (path === "/api/config/trigger-scan" && request.method === "POST") {
-      const authErr = requireAuth(request, env);
-      if (authErr) return authErr;
-      const config = await loadConfig(env);
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
+      const userId = isHostedMode(env) ? user.id : null;
+      const config = await loadConfig(env, userId);
       const alerts = await runMonitor(env, config);
       return jsonResponse({ success: true, alertsSent: alerts.length });
     }
 
     // ── Config API: Detect RSS ──
     if (path === "/api/config/detect-rss" && request.method === "POST") {
-      const authErr = requireAuth(request, env);
-      if (authErr) return authErr;
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
       try {
         const body = await request.json();
         if (!body.url) return jsonResponse({ error: "url required" }, 400);
@@ -1267,6 +2104,11 @@ export default {
     }
 
     // ── Home ──
+    if (isHostedMode(env)) {
+      const user = await getSessionUser(request, env);
+      if (user) return Response.redirect(url.origin + "/dashboard", 302);
+      return Response.redirect(url.origin + "/signin", 302);
+    }
     const config = await loadConfig(env);
     const setupDone = await env.STATE.get("config:setup_complete");
     if (!setupDone && config.competitors.length === 0) {

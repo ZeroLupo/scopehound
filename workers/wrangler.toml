@@ -15,6 +15,22 @@ id = "YOUR_KV_NAMESPACE_ID"
 [ai]
 binding = "AI"
 
-# Secrets (set via Cloudflare dashboard or wrangler):
-# ADMIN_TOKEN     - protects config API (wrangler secret put ADMIN_TOKEN)
-# SLACK_WEBHOOK_URL - optional fallback (wrangler secret put SLACK_WEBHOOK_URL)
+# ─── SECRETS ────────────────────────────────────────────────────────────────
+# Set via Cloudflare dashboard (Settings → Variables → Secrets) or wrangler CLI.
+#
+# SELF-HOSTED (required):
+#   ADMIN_TOKEN          - protects config API and setup wizard
+#
+# SELF-HOSTED (optional):
+#   SLACK_WEBHOOK_URL    - fallback if not set via setup wizard
+#
+# HOSTED MODE (set all 5 to activate auth + payments):
+#   GOOGLE_CLIENT_ID     - Google OAuth client ID
+#   GOOGLE_CLIENT_SECRET - Google OAuth client secret
+#   STRIPE_SECRET_KEY    - Stripe secret key (sk_live_... or sk_test_...)
+#   STRIPE_WEBHOOK_SECRET - Stripe webhook signing secret (whsec_...)
+#   JWT_SECRET           - random string for signing session cookies
+#
+# HOSTED MODE (optional):
+#   STRIPE_PRICE_IDS     - JSON mapping tier names to Stripe Price IDs
+#                          e.g. {"operator":"price_xxx","commander":"price_yyy","strategic":"price_zzz"}
