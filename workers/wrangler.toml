@@ -1,4 +1,4 @@
-name = "scopehound"
+name = "scopehoundv3-worker"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
@@ -9,7 +9,7 @@ crons = ["0 9 * * *"]
 # KV namespace for storing state
 [[kv_namespaces]]
 binding = "STATE"
-id = "YOUR_KV_NAMESPACE_ID"
+id = "5f9d1d2230024aa0a2d49f441ba7ce5c"
 
 # Workers AI binding (free tier)
 [ai]
@@ -33,4 +33,8 @@ binding = "AI"
 #
 # HOSTED MODE (optional):
 #   STRIPE_PRICE_IDS     - JSON mapping tier names to Stripe Price IDs
-#                          e.g. {"operator":"price_xxx","commander":"price_yyy","strategic":"price_zzz"}
+#                          e.g. {"recon":"price_xxx","operator":"price_yyy","commander":"price_zzz","strategic":"price_zzz"}
+#
+# SLACK OAUTH (optional, enables "Add to Slack" button):
+#   SLACK_CLIENT_ID      - Slack app client ID
+#   SLACK_CLIENT_SECRET  - Slack app client secret

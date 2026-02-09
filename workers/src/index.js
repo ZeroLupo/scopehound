@@ -1796,15 +1796,30 @@ input:focus{outline:none;border-color:#5c6b3c}
 <!-- Step 1: Slack -->
 <div class="panel active" id="panel1">
 <h2>Connect Slack</h2>
-<p class="subtitle">ScopeHound delivers your daily competitive intel briefing to Slack.</p>
-<p class="helper">Need help? <a href="https://api.slack.com/messaging/webhooks" target="_blank">How to create a Slack webhook</a></p>
-<label for="slackUrl">Slack Webhook URL</label>
-<input type="url" id="slackUrl" placeholder="https://hooks.slack.com/services/...">
+<p class="subtitle">ScopeHound delivers your daily competitive intel briefing to Slack. One click to connect.</p>
 <div id="slackMsg"></div>
+<div id="slackConnected" style="display:none">
+<div class="msg msg-ok" id="slackStatus">Connected to Slack!</div>
+</div>
+<div id="slackNotConnected">
+<div style="margin:24px 0;text-align:center">
+<a href="/auth/slack" class="btn btn-primary" style="display:inline-flex;align-items:center;gap:10px;padding:14px 28px;font-size:14px">
+<svg width="20" height="20" viewBox="0 0 123 123" fill="none"><path d="M25.8 77.6a12.9 12.9 0 1 1-12.9-12.9h12.9v12.9zm6.5 0a12.9 12.9 0 1 1 25.8 0v32.3a12.9 12.9 0 1 1-25.8 0V77.6z" fill="#E01E5A"/><path d="M45.2 25.8a12.9 12.9 0 1 1 12.9-12.9v12.9H45.2zm0 6.5a12.9 12.9 0 1 1 0 25.8H12.9a12.9 12.9 0 0 1 0-25.8h32.3z" fill="#36C5F0"/><path d="M97.2 45.2a12.9 12.9 0 1 1 12.9 12.9H97.2V45.2zm-6.5 0a12.9 12.9 0 1 1-25.8 0V12.9a12.9 12.9 0 1 1 25.8 0v32.3z" fill="#2EB67D"/><path d="M77.8 97.2a12.9 12.9 0 1 1-12.9 12.9V97.2h12.9zm0-6.5a12.9 12.9 0 1 1 0-25.8h32.3a12.9 12.9 0 0 1 0 25.8H77.8z" fill="#ECB22E"/></svg>
+Add to Slack
+</a>
+</div>
+<details style="margin-top:16px">
+<summary style="font-size:12px;color:#6b7280;cursor:pointer">I already have a webhook URL</summary>
+<div style="margin-top:8px">
+<input type="url" id="slackUrl" placeholder="https://hooks.slack.com/services/...">
+<button class="btn btn-secondary btn-sm" onclick="testSlack()" style="margin-top:4px">Test & Connect</button>
+</div>
+</details>
+</div>
 <div class="nav-btns">
 <div></div>
-<div style="display:flex;gap:8px">
-<button class="btn btn-secondary btn-sm" onclick="testSlack()">Test Connection</button>
+<div style="display:flex;gap:8px;align-items:center">
+<a href="#" onclick="skipSlack();return false" style="font-size:12px;color:#6b7280" id="skipLink">Skip for now</a>
 <button class="btn btn-primary" id="slackNext" onclick="goStep(2)" disabled>Next</button>
 </div>
 </div>
@@ -1835,22 +1850,42 @@ input:focus{outline:none;border-color:#5c6b3c}
 </div>
 </div>
 <script>
-let currentStep=1,slackVerified=false,competitors=[];
+let currentStep=1,slackVerified=false,slackSkipped=false,competitors=[];
 async function loadUserInfo(){
   try{const r=await fetch("/api/user/profile");if(r.ok){const u=await r.json();
   const t=u.tier||"recon";const limits={recon:{c:3,p:6},operator:{c:15,p:60},commander:{c:25,p:100},strategic:{c:50,p:200}};
   const l=limits[t]||limits.recon;
   document.getElementById("tierInfo").innerHTML="You can add up to <strong>"+l.c+" competitors</strong> on your "+t.charAt(0).toUpperCase()+t.slice(1)+" plan.";
   window._tierLimits=l;window._tier=t;}}catch(e){}
+  // Check if Slack was just connected via OAuth
+  if(new URLSearchParams(location.search).get("slack")==="connected"){
+    slackVerified=true;
+    document.getElementById("slackConnected").style.display="block";
+    document.getElementById("slackNotConnected").style.display="none";
+    document.getElementById("slackNext").disabled=false;
+    document.getElementById("skipLink").style.display="none";
+  }
+  // Check if Slack is already configured
+  try{const r=await fetch("/api/config");if(r.ok){const c=await r.json();
+  if(c.settings&&c.settings.slackWebhookUrl){
+    slackVerified=true;
+    document.getElementById("slackConnected").style.display="block";
+    document.getElementById("slackNotConnected").style.display="none";
+    document.getElementById("slackNext").disabled=false;
+    document.getElementById("skipLink").style.display="none";
+    const ch=c.settings.slackChannel;
+    document.getElementById("slackStatus").textContent="Connected to Slack"+(ch?" (#"+ch+")":"")+"!";
+  }}}catch(e){}
 }
 function goStep(n){
-  if(n===2&&!slackVerified){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Please test your Slack connection first.</div>';return;}
+  if(n===2&&!slackVerified&&!slackSkipped){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Connect Slack or click Skip for now.</div>';return;}
   if(n===3&&competitors.length===0){alert("Add at least one competitor.");return;}
   currentStep=n;
   document.querySelectorAll(".panel").forEach((p,i)=>{p.classList.toggle("active",i===n-1);});
   document.querySelectorAll(".step-tab").forEach((t,i)=>{t.className="step-tab"+(i===n-1?" active":i<n-1?" done":"");});
   if(n===3)renderReview();
 }
+function skipSlack(){slackSkipped=true;goStep(2);}
 async function testSlack(){
   const u=document.getElementById("slackUrl").value.trim();
   if(!u){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Enter a webhook URL.</div>';return;}
@@ -1858,8 +1893,12 @@ async function testSlack(){
   try{const r=await fetch("/api/config/test-slack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({webhookUrl:u})});
   const d=await r.json();
   if(d.success){slackVerified=true;document.getElementById("slackNext").disabled=false;
-  document.getElementById("slackMsg").innerHTML='<div class="msg msg-ok">Connected! Check your Slack channel.</div>';}
-  else{document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+(d.error||"Failed to connect.")+'</div>';}
+  document.getElementById("slackConnected").style.display="block";document.getElementById("slackNotConnected").style.display="none";
+  document.getElementById("slackStatus").textContent="Connected! Check your Slack channel.";
+  document.getElementById("skipLink").style.display="none";
+  // Save webhook URL
+  await fetch("/api/config/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slackWebhookUrl:u})});
+  }else{document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+(d.error||"Failed to connect.")+'</div>';}
   }catch(e){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
 }
 function addCompetitor(){
@@ -2182,6 +2221,64 @@ export default {
         const headers = new Headers({ Location: url.origin + "/" });
         clearSessionCookie(headers);
         return new Response(null, { status: 302, headers });
+      }
+
+      // ── Slack OAuth: initiate ──
+      if (path === "/auth/slack") {
+        if (!env.SLACK_CLIENT_ID) return new Response("Slack integration not configured", { status: 500 });
+        const user = await getSessionUser(request, env);
+        if (!user) return Response.redirect(url.origin + "/signin", 302);
+        const nonce = crypto.randomUUID();
+        await env.STATE.put("csrf:" + nonce, "1", { expirationTtl: 600 });
+        const slackUrl = "https://slack.com/oauth/v2/authorize?" + new URLSearchParams({
+          client_id: env.SLACK_CLIENT_ID,
+          scope: "incoming-webhook",
+          redirect_uri: url.origin + "/auth/slack/callback",
+          state: JSON.stringify({ nonce, userId: user.id }),
+        }).toString();
+        return Response.redirect(slackUrl, 302);
+      }
+
+      // ── Slack OAuth: callback ──
+      if (path === "/auth/slack/callback") {
+        try {
+          const code = url.searchParams.get("code");
+          const stateRaw = url.searchParams.get("state");
+          if (!code || !stateRaw) return new Response("Missing code or state", { status: 400 });
+          const state = JSON.parse(stateRaw);
+          const csrfValid = await env.STATE.get("csrf:" + state.nonce);
+          if (!csrfValid) return new Response("Invalid or expired state", { status: 400 });
+          await env.STATE.delete("csrf:" + state.nonce);
+          // Exchange code for webhook
+          const tokenRes = await fetch("https://slack.com/api/oauth.v2.access", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: env.SLACK_CLIENT_ID,
+              client_secret: env.SLACK_CLIENT_SECRET,
+              code,
+              redirect_uri: url.origin + "/auth/slack/callback",
+            }).toString(),
+          });
+          const tokenData = await tokenRes.json();
+          if (!tokenData.ok || !tokenData.incoming_webhook?.url) {
+            return new Response("Slack authorization failed: " + (tokenData.error || "unknown"), { status: 400 });
+          }
+          // Save webhook URL to user settings
+          const userId = state.userId;
+          const prefix = "user_config:" + userId + ":";
+          const existingRaw = await env.STATE.get(prefix + "settings");
+          const settings = existingRaw ? JSON.parse(existingRaw) : {};
+          settings.slackWebhookUrl = tokenData.incoming_webhook.url;
+          settings.slackChannel = tokenData.incoming_webhook.channel;
+          settings.slackTeam = tokenData.team?.name || null;
+          await env.STATE.put(prefix + "settings", JSON.stringify(settings));
+          // Send test message
+          await sendSlack(tokenData.incoming_webhook.url, "ScopeHound is connected to #" + (tokenData.incoming_webhook.channel || "your channel") + ". You're all set!");
+          return Response.redirect(url.origin + "/setup?slack=connected", 302);
+        } catch (e) {
+          return new Response("Slack auth error: " + e.message, { status: 500 });
+        }
       }
 
       // ── User profile ──
