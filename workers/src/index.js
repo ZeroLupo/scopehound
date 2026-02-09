@@ -995,7 +995,7 @@ async function findOrCreateUser(env, provider, profile, refCode) {
     picture: profile.picture || null,
     provider,
     providerId: profile.id,
-    tier: "recon",
+    tier: null,
     stripeCustomerId: null,
     stripeSubscriptionId: null,
     subscriptionStatus: null,
@@ -1154,7 +1154,7 @@ async function handleStripeWebhook(event, env) {
       const raw = await env.STATE.get("user:" + userId);
       if (!raw) break;
       const user = JSON.parse(raw);
-      user.tier = "recon";
+      user.tier = null;
       user.subscriptionStatus = "canceled";
       user.stripeSubscriptionId = null;
       await env.STATE.put("user:" + userId, JSON.stringify(user));
@@ -1706,12 +1706,14 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <script>
 async function loadProfile(){
   try{const r=await fetch("/api/user/profile");if(!r.ok)return;const u=await r.json();
-  document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"RECON PLAN";
-  document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"No subscription";
-  const tier=u.tier||"recon";
+  document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"NO PLAN";
+  document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"Choose a plan to get started";
+  const tier=u.tier;
+  const tierOrder=["recon","operator","commander","strategic"];
   document.querySelectorAll(".plan").forEach(p=>{const t=p.dataset.tier;const btn=p.querySelector("button");
-  if(t===tier){p.classList.add("active");btn.className="btn btn-current";btn.textContent="Current Plan";btn.onclick=null;}
-  else if(["operator","commander","strategic"].indexOf(t)>["operator","commander","strategic"].indexOf(tier)){btn.textContent="Upgrade";btn.className="btn btn-primary";}
+  if(!tier){btn.textContent="Subscribe";btn.className="btn btn-primary";btn.onclick=function(){checkout(t);};}
+  else if(t===tier){p.classList.add("active");btn.className="btn btn-current";btn.textContent="Current Plan";btn.onclick=null;}
+  else if(tierOrder.indexOf(t)>tierOrder.indexOf(tier)){btn.textContent="Upgrade";btn.className="btn btn-primary";}
   else{btn.textContent="Downgrade";btn.className="btn btn-secondary";}});
   if(u.stripeCustomerId)document.getElementById("manageSection").style.display="block";
   }catch(e){}
