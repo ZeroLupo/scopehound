@@ -23,7 +23,7 @@ const DEFAULT_ANNOUNCEMENT_KEYWORDS = {
 // ─── TIER DEFINITIONS ────────────────────────────────────────────────────────
 
 const TIERS = {
-  recon:     { name: "Recon",     price: 0,   competitors: 3,  pages: 6,   scansPerDay: 1, historyDays: 30 },
+  recon:     { name: "Recon",     price: 19.99, competitors: 3,  pages: 6,   scansPerDay: 1, historyDays: 30 },
   operator:  { name: "Operator",  price: 49,  competitors: 15, pages: 60,  scansPerDay: 1, historyDays: 90 },
   commander: { name: "Commander", price: 99,  competitors: 25, pages: 100, scansPerDay: 2, historyDays: 365 },
   strategic: { name: "Strategic", price: 199, competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
@@ -308,19 +308,22 @@ function detectAnnouncement(title, keywords) {
 
 // ─── HISTORY ─────────────────────────────────────────────────────────────────
 
-async function loadHistory(env) {
+async function loadHistory(env, userId) {
   try {
-    const data = await env.STATE.get("change_history");
+    const key = userId ? "user_state:" + userId + ":history" : "change_history";
+    const data = await env.STATE.get(key);
     if (data) return JSON.parse(data);
   } catch (e) {}
   return [];
 }
 
-async function saveHistory(env, history) {
+async function saveHistory(env, history, userId, historyDays) {
+  const days = historyDays || 90;
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 90);
+  cutoff.setDate(cutoff.getDate() - days);
   const pruned = history.filter((e) => new Date(e.date) > cutoff).slice(-500);
-  await env.STATE.put("change_history", JSON.stringify(pruned));
+  const key = userId ? "user_state:" + userId + ":history" : "change_history";
+  await env.STATE.put(key, JSON.stringify(pruned));
 }
 
 // ─── SLACK FORMATTING ────────────────────────────────────────────────────────
@@ -437,7 +440,7 @@ async function fetchProductHuntPosts(topic, token) {
 
 // ─── STATE MIGRATION (v1 → v2) ──────────────────────────────────────────────
 
-async function migrateState(env, old, competitors, topics) {
+async function migrateState(env, old, competitors, topics, userId) {
   const state = { _version: 2, competitors: {}, productHunt: {} };
   for (const comp of competitors) {
     const oc = old[comp.name];
@@ -462,15 +465,16 @@ async function migrateState(env, old, competitors, topics) {
     const phKey = `ph_${topic.slug}`;
     if (old[phKey]) state.productHunt[topic.slug] = { postIds: old[phKey].postIds || [] };
   }
-  await env.STATE.put("monitor_state", JSON.stringify(state));
+  const stateKey = userId ? "user_state:" + userId + ":monitor" : "monitor_state";
+  await env.STATE.put(stateKey, JSON.stringify(state));
   console.log("State migrated v1 → v2");
   return state;
 }
 
 // ─── MAIN MONITORING LOGIC ──────────────────────────────────────────────────
 
-async function runMonitor(env, configOverride) {
-  const config = configOverride || await loadConfig(env);
+async function runMonitor(env, configOverride, userId) {
+  const config = configOverride || await loadConfig(env, userId);
   const { competitors, settings } = config;
 
   if (competitors.length === 0) {
@@ -491,17 +495,18 @@ async function runMonitor(env, configOverride) {
   const keywords = settings.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS;
 
   // Load or migrate state
+  const stateKey = userId ? "user_state:" + userId + ":monitor" : "monitor_state";
   let state;
   try {
-    const raw = await env.STATE.get("monitor_state");
+    const raw = await env.STATE.get(stateKey);
     if (raw) {
       state = JSON.parse(raw);
-      if (state._version !== 2) state = await migrateState(env, state, competitors, phTopics);
+      if (state._version !== 2) state = await migrateState(env, state, competitors, phTopics, userId);
     }
   } catch (e) { console.log("State load error, starting fresh"); }
   if (!state) state = { _version: 2, competitors: {}, productHunt: {} };
 
-  let history = await loadHistory(env);
+  let history = await loadHistory(env, userId);
 
   // ── CHECK COMPETITORS ──
   for (const competitor of competitors) {
@@ -662,12 +667,20 @@ async function runMonitor(env, configOverride) {
   }
 
   // ── PERSIST ──
-  await env.STATE.put("monitor_state", JSON.stringify(state));
+  await env.STATE.put(stateKey, JSON.stringify(state));
+  // Determine history retention days for this user's tier
+  let historyDays = 90;
+  if (userId) {
+    try {
+      const uRaw = await env.STATE.get("user:" + userId);
+      if (uRaw) { const u = JSON.parse(uRaw); const td = TIERS[u.tier]; if (td && td.historyDays > 0) historyDays = td.historyDays; else if (td && td.historyDays === -1) historyDays = 99999; }
+    } catch {}
+  }
   if (historyEvents.length > 0) {
     history = history.concat(historyEvents);
-    await saveHistory(env, history);
+    await saveHistory(env, history, userId, historyDays);
   }
-  await buildDashboardCache(env, state, history, competitors);
+  await buildDashboardCache(env, state, history, competitors, userId);
   console.log("\nState saved");
 
   // ── SEND ALERTS ──
@@ -688,7 +701,7 @@ async function runMonitor(env, configOverride) {
 
 // ─── DASHBOARD CACHE ─────────────────────────────────────────────────────────
 
-async function buildDashboardCache(env, state, history, competitors) {
+async function buildDashboardCache(env, state, history, competitors, userId) {
   const cache = {
     generatedAt: new Date().toISOString(),
     competitors: competitors.map((comp) => {
@@ -707,7 +720,8 @@ async function buildDashboardCache(env, state, history, competitors) {
     }),
     recentChanges: (history || []).slice(-50).reverse(),
   };
-  await env.STATE.put("dashboard_cache", JSON.stringify(cache));
+  const cacheKey = userId ? "user_state:" + userId + ":dashboard" : "dashboard_cache";
+  await env.STATE.put(cacheKey, JSON.stringify(cache));
 }
 
 // ─── RSS AUTO-DETECTION ─────────────────────────────────────────────────────
@@ -741,6 +755,74 @@ async function detectRssFeed(websiteUrl) {
     }
   } catch (e) {}
   return null;
+}
+
+async function discoverPages(websiteUrl) {
+  const base = websiteUrl.replace(/\/+$/, "");
+  const origin = new URL(base).origin;
+  const pages = [{ url: base, type: "general", label: "Homepage" }];
+  const seen = new Set([base, base + "/"]);
+  try {
+    const html = await fetchUrl(base);
+    if (!html) return pages;
+    // Extract RSS from <link> tags
+    const rssMatch = html.match(/<link[^>]*type=["']application\/(rss|atom)\+xml["'][^>]*href=["']([^"']+)["']/i);
+    let rssUrl = null;
+    if (rssMatch) {
+      rssUrl = rssMatch[2].startsWith("http") ? rssMatch[2] : origin + rssMatch[2];
+    }
+    // Extract all <a href="..."> links
+    const linkRegex = /<a[^>]+href=["']([^"'#]+)["']/gi;
+    let match;
+    const links = [];
+    while ((match = linkRegex.exec(html)) !== null) {
+      let href = match[1];
+      if (href.startsWith("/")) href = origin + href;
+      if (!href.startsWith("http")) continue;
+      try { if (new URL(href).origin !== origin) continue; } catch { continue; }
+      const path = new URL(href).pathname.toLowerCase();
+      links.push({ href: href.split("?")[0].split("#")[0], path });
+    }
+    // Match against known patterns
+    const patterns = [
+      { match: ["/pricing", "/plans", "/plan", "/price"], type: "pricing", label: "Pricing" },
+      { match: ["/blog", "/news", "/updates", "/changelog", "/articles"], type: "blog", label: "Blog" },
+      { match: ["/careers", "/jobs", "/hiring", "/join"], type: "careers", label: "Careers" },
+      { match: ["/features", "/product"], type: "general", label: "Features" },
+    ];
+    for (const p of patterns) {
+      for (const link of links) {
+        if (p.match.some(m => link.path === m || link.path === m + "/")) {
+          if (!seen.has(link.href)) {
+            const entry = { url: link.href, type: p.type, label: p.label };
+            if (p.type === "blog" && rssUrl) entry.rss = rssUrl;
+            pages.push(entry);
+            seen.add(link.href);
+          }
+          break;
+        }
+      }
+    }
+    // If no blog found but RSS detected, try to detect blog via RSS
+    if (!pages.find(p => p.type === "blog") && !rssUrl) {
+      rssUrl = await detectRssFeed(base);
+    }
+    if (!pages.find(p => p.type === "blog") && rssUrl) {
+      pages.push({ url: base + "/blog", type: "blog", label: "Blog", rss: rssUrl });
+    }
+    // If no pricing found, check common paths directly
+    if (!pages.find(p => p.type === "pricing")) {
+      for (const tryPath of ["/pricing", "/plans"]) {
+        try {
+          const r = await fetch(origin + tryPath, { method: "HEAD", headers: { "User-Agent": "Scopehound/3.0" }, redirect: "follow" });
+          if (r.ok) { pages.push({ url: origin + tryPath, type: "pricing", label: "Pricing" }); break; }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    console.log("discoverPages error: " + e.message);
+  }
+  return pages;
 }
 
 // ─── AUTH ────────────────────────────────────────────────────────────────────
@@ -972,7 +1054,7 @@ async function verifyStripeSignature(rawBody, sigHeader, secret) {
 
 async function createCheckoutSession(env, user, tier, origin) {
   const tierDef = TIERS[tier];
-  if (!tierDef || tierDef.price === 0) return null;
+  if (!tierDef) return null;
   const priceIds = env.STRIPE_PRICE_IDS ? JSON.parse(env.STRIPE_PRICE_IDS) : {};
   const priceId = priceIds[tier];
   if (!priceId) return null;
@@ -996,6 +1078,22 @@ async function createCheckoutSession(env, user, tier, origin) {
     params["subscription_data[metadata][affiliate_code]"] = user.referredBy;
   }
   return await stripeAPI("/checkout/sessions", "POST", params, env);
+}
+
+async function addActiveSubscriber(env, userId) {
+  const raw = await env.STATE.get("active_subscribers");
+  const list = raw ? JSON.parse(raw) : [];
+  if (!list.includes(userId)) {
+    list.push(userId);
+    await env.STATE.put("active_subscribers", JSON.stringify(list));
+  }
+}
+
+async function removeActiveSubscriber(env, userId) {
+  const raw = await env.STATE.get("active_subscribers");
+  if (!raw) return;
+  const list = JSON.parse(raw).filter(id => id !== userId);
+  await env.STATE.put("active_subscribers", JSON.stringify(list));
 }
 
 async function handleStripeWebhook(event, env) {
@@ -1023,6 +1121,7 @@ async function handleStripeWebhook(event, env) {
         env.STATE.put("user:" + userId, JSON.stringify(user)),
         env.STATE.put("sub:" + session.subscription, userId),
         env.STATE.put("stripe_customer:" + session.customer, userId),
+        addActiveSubscriber(env, userId),
       ]);
       // Record affiliate commission on first payment
       const affCode = session.metadata?.affiliate_code || user.referredBy;
@@ -1043,6 +1142,8 @@ async function handleStripeWebhook(event, env) {
       user.tier = newTier;
       user.subscriptionStatus = sub.status;
       await env.STATE.put("user:" + userId, JSON.stringify(user));
+      if (sub.status === "active") await addActiveSubscriber(env, userId);
+      else await removeActiveSubscriber(env, userId);
       processed = true;
       break;
     }
@@ -1057,6 +1158,7 @@ async function handleStripeWebhook(event, env) {
       user.subscriptionStatus = "canceled";
       user.stripeSubscriptionId = null;
       await env.STATE.put("user:" + userId, JSON.stringify(user));
+      await removeActiveSubscriber(env, userId);
       processed = true;
       break;
     }
@@ -1188,6 +1290,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScopeHound — Competitive Intelligence</title>
+<script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.5}
@@ -1281,6 +1384,7 @@ const SETUP_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScopeHound — Setup</title>
+<script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
@@ -1515,6 +1619,7 @@ const SIGNIN_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScopeHound — Sign In</title>
+<script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -1549,6 +1654,7 @@ const BILLING_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScopeHound — Billing</title>
+<script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
@@ -1590,7 +1696,7 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <div class="current" id="currentPlan"><div><div class="current-plan" id="planName">Loading...</div><div class="current-status" id="planStatus"></div></div></div>
 <h2>Plans</h2>
 <div class="grid">
-<div class="plan" data-tier="recon"><div class="plan-name">Recon</div><div class="plan-price">$0<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Daily scans</li><li>30-day history</li></ul><button class="btn btn-secondary" id="btn-recon">Current Plan</button></div>
+<div class="plan" data-tier="recon"><div class="plan-name">Recon</div><div class="plan-price">$19.99<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Daily scans</li><li>30-day history</li></ul><button class="btn btn-primary" id="btn-recon" onclick="checkout('recon')">Subscribe</button></div>
 <div class="plan" data-tier="operator"><div class="plan-name">Operator</div><div class="plan-price">$49<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>Daily scans</li><li>90-day history</li><li>3 users</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Upgrade</button></div>
 <div class="plan" data-tier="commander"><div class="plan-name">Commander</div><div class="plan-price">$99<span class="mo">/mo</span></div><ul class="plan-features"><li>25 competitors</li><li>100 pages</li><li>2x daily</li><li>1-year history</li><li>10 users</li></ul><button class="btn btn-primary" id="btn-commander" onclick="checkout('commander')">Upgrade</button></div>
 <div class="plan" data-tier="strategic"><div class="plan-name">Strategic</div><div class="plan-price">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>4x daily</li><li>Unlimited history</li><li>Unlimited users</li></ul><button class="btn btn-primary" id="btn-strategic" onclick="checkout('strategic')">Upgrade</button></div>
@@ -1601,7 +1707,7 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 async function loadProfile(){
   try{const r=await fetch("/api/user/profile");if(!r.ok)return;const u=await r.json();
   document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"RECON PLAN";
-  document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"Free";
+  document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"No subscription";
   const tier=u.tier||"recon";
   document.querySelectorAll(".plan").forEach(p=>{const t=p.dataset.tier;const btn=p.querySelector("button");
   if(t===tier){p.classList.add("active");btn.className="btn btn-current";btn.textContent="Current Plan";btn.onclick=null;}
@@ -1609,11 +1715,251 @@ async function loadProfile(){
   else{btn.textContent="Downgrade";btn.className="btn btn-secondary";}});
   if(u.stripeCustomerId)document.getElementById("manageSection").style.display="block";
   }catch(e){}
-  if(new URLSearchParams(location.search).get("success"))document.getElementById("successMsg").innerHTML='<div class="msg msg-ok">Subscription activated! Your plan has been upgraded.</div>';
+  if(new URLSearchParams(location.search).get("success")){window.location.href="/setup";return;}
 }
 async function checkout(tier){try{const r=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
 async function manageSubscription(){try{const r=await fetch("/api/billing/portal",{method:"POST"});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
 loadProfile();
+</script>
+</body>
+</html>`;
+
+// ─── HOSTED SETUP WIZARD HTML ─────────────────────────────────────────────────
+
+const HOSTED_SETUP_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ScopeHound — Setup</title>
+<script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
+a{color:#7a8c52;text-decoration:none}
+header{background:#12161a;border-bottom:1px solid #2a3038;padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+header h1{font-size:18px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em}
+header h1 span{color:#5c6b3c}
+.wrap{max-width:700px;margin:0 auto;padding:32px 24px}
+h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px}
+.subtitle{font-size:13px;color:#6b7280;margin-bottom:20px}
+.steps{display:flex;gap:8px;margin-bottom:32px}
+.step-tab{flex:1;padding:10px;text-align:center;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;background:#12161a;border:1px solid #2a3038;border-radius:2px;color:#6b7280;cursor:default}
+.step-tab.active{border-color:#5c6b3c;color:#d4d8de}
+.step-tab.done{border-color:#3d6b35;color:#3d6b35}
+.panel{display:none}
+.panel.active{display:block}
+label{display:block;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#6b7280;margin-bottom:6px}
+input[type="text"],input[type="url"]{width:100%;padding:10px 12px;background:#12161a;border:1px solid #2a3038;border-radius:2px;color:#d4d8de;font-size:14px;margin-bottom:12px}
+input:focus{outline:none;border-color:#5c6b3c}
+.btn{display:inline-block;padding:10px 20px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;text-align:center;cursor:pointer;border:none;border-radius:2px}
+.btn-primary{background:#5c6b3c;color:#d4d8de}
+.btn-primary:hover{background:#7a8c52}
+.btn-secondary{background:transparent;border:1px solid #2a3038;color:#6b7280}
+.btn-secondary:hover{border-color:#5c6b3c;color:#d4d8de}
+.btn-sm{padding:6px 14px;font-size:11px}
+.btn:disabled{opacity:0.4;cursor:not-allowed}
+.msg{padding:8px 12px;border-radius:2px;font-size:13px;margin-bottom:12px}
+.msg-ok{background:#3d6b3522;border:1px solid #3d6b35;color:#3d6b35}
+.msg-err{background:#6b353522;border:1px solid #6b3535;color:#c55}
+.comp-card{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:16px;margin-bottom:12px;position:relative}
+.comp-card .remove{position:absolute;top:12px;right:12px;background:none;border:none;color:#6b7280;cursor:pointer;font-size:16px}
+.comp-card .remove:hover{color:#c55}
+.pages-list{margin:8px 0 0}
+.pages-list label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;color:#d4d8de;margin-bottom:4px;cursor:pointer}
+.pages-list input[type="checkbox"]{width:auto;margin:0;accent-color:#5c6b3c}
+.pages-list .page-url{color:#6b7280;font-size:11px;margin-left:4px}
+.custom-page{display:flex;gap:8px;margin-top:8px}
+.custom-page input{flex:1;margin-bottom:0}
+.tier-info{font-size:12px;color:#6b7280;margin-bottom:16px}
+.tier-info strong{color:#5c6b3c}
+.scanning{color:#6b7280;font-size:13px;font-style:italic}
+.helper{font-size:12px;color:#6b7280;margin-bottom:16px}
+.helper a{color:#7a8c52}
+.review-item{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #1a1f25;font-size:14px}
+.review-label{color:#6b7280}
+.nav-btns{display:flex;justify-content:space-between;margin-top:24px}
+@media(max-width:600px){.steps{flex-direction:column}}
+</style>
+</head>
+<body>
+<header><h1>Scope<span>Hound</span></h1><a href="/billing">Billing</a></header>
+<div class="wrap">
+<div class="steps">
+<div class="step-tab active" id="tab1">1. Slack</div>
+<div class="step-tab" id="tab2">2. Competitors</div>
+<div class="step-tab" id="tab3">3. Launch</div>
+</div>
+
+<!-- Step 1: Slack -->
+<div class="panel active" id="panel1">
+<h2>Connect Slack</h2>
+<p class="subtitle">ScopeHound delivers your daily competitive intel briefing to Slack.</p>
+<p class="helper">Need help? <a href="https://api.slack.com/messaging/webhooks" target="_blank">How to create a Slack webhook</a></p>
+<label for="slackUrl">Slack Webhook URL</label>
+<input type="url" id="slackUrl" placeholder="https://hooks.slack.com/services/...">
+<div id="slackMsg"></div>
+<div class="nav-btns">
+<div></div>
+<div style="display:flex;gap:8px">
+<button class="btn btn-secondary btn-sm" onclick="testSlack()">Test Connection</button>
+<button class="btn btn-primary" id="slackNext" onclick="goStep(2)" disabled>Next</button>
+</div>
+</div>
+</div>
+
+<!-- Step 2: Competitors -->
+<div class="panel" id="panel2">
+<h2>Add Competitors</h2>
+<div class="tier-info" id="tierInfo"></div>
+<div id="compList"></div>
+<button class="btn btn-secondary btn-sm" onclick="addCompetitor()" id="addCompBtn">+ Add Competitor</button>
+<div class="nav-btns">
+<button class="btn btn-secondary" onclick="goStep(1)">Back</button>
+<button class="btn btn-primary" id="compNext" onclick="goStep(3)">Next</button>
+</div>
+</div>
+
+<!-- Step 3: Review & Launch -->
+<div class="panel" id="panel3">
+<h2>Review & Launch</h2>
+<p class="subtitle">Confirm your setup and launch your first scan.</p>
+<div id="reviewSummary"></div>
+<div id="launchMsg"></div>
+<div class="nav-btns">
+<button class="btn btn-secondary" onclick="goStep(2)">Back</button>
+<button class="btn btn-primary" id="launchBtn" onclick="launch()">Save & Launch First Scan</button>
+</div>
+</div>
+</div>
+<script>
+let currentStep=1,slackVerified=false,competitors=[];
+async function loadUserInfo(){
+  try{const r=await fetch("/api/user/profile");if(r.ok){const u=await r.json();
+  const t=u.tier||"recon";const limits={recon:{c:3,p:6},operator:{c:15,p:60},commander:{c:25,p:100},strategic:{c:50,p:200}};
+  const l=limits[t]||limits.recon;
+  document.getElementById("tierInfo").innerHTML="You can add up to <strong>"+l.c+" competitors</strong> on your "+t.charAt(0).toUpperCase()+t.slice(1)+" plan.";
+  window._tierLimits=l;window._tier=t;}}catch(e){}
+}
+function goStep(n){
+  if(n===2&&!slackVerified){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Please test your Slack connection first.</div>';return;}
+  if(n===3&&competitors.length===0){alert("Add at least one competitor.");return;}
+  currentStep=n;
+  document.querySelectorAll(".panel").forEach((p,i)=>{p.classList.toggle("active",i===n-1);});
+  document.querySelectorAll(".step-tab").forEach((t,i)=>{t.className="step-tab"+(i===n-1?" active":i<n-1?" done":"");});
+  if(n===3)renderReview();
+}
+async function testSlack(){
+  const u=document.getElementById("slackUrl").value.trim();
+  if(!u){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Enter a webhook URL.</div>';return;}
+  document.getElementById("slackMsg").innerHTML='<div class="msg">Testing...</div>';
+  try{const r=await fetch("/api/config/test-slack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({webhookUrl:u})});
+  const d=await r.json();
+  if(d.success){slackVerified=true;document.getElementById("slackNext").disabled=false;
+  document.getElementById("slackMsg").innerHTML='<div class="msg msg-ok">Connected! Check your Slack channel.</div>';}
+  else{document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+(d.error||"Failed to connect.")+'</div>';}
+  }catch(e){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
+}
+function addCompetitor(){
+  const lim=window._tierLimits;
+  if(lim&&competitors.length>=lim.c){alert("You've reached your plan limit of "+lim.c+" competitors.");return;}
+  const idx=competitors.length;
+  competitors.push({name:"",website:"",pages:[],blogRss:null});
+  renderCompetitors();
+}
+function removeCompetitor(idx){competitors.splice(idx,1);renderCompetitors();}
+function renderCompetitors(){
+  const el=document.getElementById("compList");
+  el.innerHTML="";
+  competitors.forEach((c,i)=>{
+    const div=document.createElement("div");div.className="comp-card";
+    div.innerHTML='<button class="remove" onclick="removeCompetitor('+i+')">&times;</button>'
+      +'<label>Company Name</label><input type="text" value="'+(c.name||"")+'" onchange="competitors['+i+'].name=this.value" placeholder="Acme Inc">'
+      +'<label>Website URL</label><div style="display:flex;gap:8px"><input type="url" value="'+(c.website||"")+'" id="url'+i+'" onchange="competitors['+i+'].website=this.value" placeholder="https://acme.com" style="flex:1;margin:0"><button class="btn btn-secondary btn-sm" onclick="scanSite('+i+')">Scan</button></div>'
+      +'<div id="pages'+i+'" class="pages-list">'+(c.pages.length?renderPageCheckboxes(i):'<p class="scanning" style="margin-top:8px;font-style:normal;color:#6b7280">Enter URL and click Scan to discover pages.</p>')+'</div>'
+      +'<div class="custom-page"><input type="url" id="custom'+i+'" placeholder="Add custom page URL"><button class="btn btn-secondary btn-sm" onclick="addCustomPage('+i+')">Add</button></div>';
+    el.appendChild(div);
+  });
+  const lim=window._tierLimits;
+  document.getElementById("addCompBtn").style.display=(lim&&competitors.length>=lim.c)?"none":"inline-block";
+}
+function renderPageCheckboxes(idx){
+  const c=competitors[idx];if(!c._discovered)return"";
+  return c._discovered.map((p,pi)=>{
+    const checked=c.pages.find(x=>x.url===p.url)?"checked":"";
+    return '<label><input type="checkbox" '+checked+' onchange="togglePage('+idx+','+pi+',this.checked)"> '+p.label+' <span class="page-url">'+p.url+'</span></label>';
+  }).join("");
+}
+function togglePage(ci,pi,on){
+  const disc=competitors[ci]._discovered[pi];
+  if(on){
+    if(!competitors[ci].pages.find(x=>x.url===disc.url)){
+      const entry={id:disc.type+"-"+competitors[ci].pages.length,url:disc.url,type:disc.type,label:disc.label};
+      if(disc.rss)competitors[ci].blogRss=disc.rss;
+      competitors[ci].pages.push(entry);
+    }
+  }else{
+    competitors[ci].pages=competitors[ci].pages.filter(x=>x.url!==disc.url);
+  }
+}
+async function scanSite(idx){
+  const u=document.getElementById("url"+idx).value.trim();
+  if(!u){alert("Enter a URL first.");return;}
+  competitors[idx].website=u;
+  document.getElementById("pages"+idx).innerHTML='<p class="scanning" style="margin-top:8px">Scanning '+u+'...</p>';
+  try{const r=await fetch("/api/config/discover-pages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u})});
+  const d=await r.json();
+  if(d.pages){
+    competitors[idx]._discovered=d.pages;
+    competitors[idx].pages=d.pages.map((p,i)=>({id:p.type+"-"+i,url:p.url,type:p.type,label:p.label}));
+    if(d.pages.find(p=>p.rss))competitors[idx].blogRss=d.pages.find(p=>p.rss).rss;
+    document.getElementById("pages"+idx).innerHTML=renderPageCheckboxes(idx);
+  }else{document.getElementById("pages"+idx).innerHTML='<p class="msg msg-err">Could not scan site.</p>';}
+  }catch(e){document.getElementById("pages"+idx).innerHTML='<p class="msg msg-err">'+e.message+'</p>';}
+}
+function addCustomPage(idx){
+  const input=document.getElementById("custom"+idx);
+  const u=input.value.trim();if(!u)return;
+  const entry={id:"custom-"+competitors[idx].pages.length,url:u,type:"general",label:"Custom"};
+  competitors[idx].pages.push(entry);
+  if(!competitors[idx]._discovered)competitors[idx]._discovered=[];
+  competitors[idx]._discovered.push({url:u,type:"general",label:"Custom"});
+  input.value="";
+  document.getElementById("pages"+idx).innerHTML=renderPageCheckboxes(idx);
+}
+function renderReview(){
+  const totalPages=competitors.reduce((s,c)=>s+c.pages.length,0);
+  document.getElementById("reviewSummary").innerHTML=
+    '<div class="review-item"><span class="review-label">Slack</span><span>Connected</span></div>'
+    +'<div class="review-item"><span class="review-label">Competitors</span><span>'+competitors.length+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Pages monitored</span><span>'+totalPages+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"recon").charAt(0).toUpperCase()+(window._tier||"recon").slice(1)+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Schedule</span><span>Daily at 9am UTC</span></div>';
+}
+async function launch(){
+  const btn=document.getElementById("launchBtn");btn.disabled=true;btn.textContent="Saving...";
+  const msgEl=document.getElementById("launchMsg");
+  try{
+    const comps=competitors.map(c=>({name:c.name,website:c.website,blogRss:c.blogRss||null,pages:c.pages.map(p=>({id:p.id,url:p.url,type:p.type,label:p.label}))}));
+    // Save competitors
+    let r=await fetch("/api/config/competitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({competitors:comps})});
+    let d=await r.json();if(!r.ok){throw new Error(d.error||"Failed to save competitors");}
+    // Save settings
+    r=await fetch("/api/config/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slackWebhookUrl:document.getElementById("slackUrl").value.trim()})});
+    d=await r.json();if(!r.ok){throw new Error(d.error||"Failed to save settings");}
+    // Trigger scan
+    btn.textContent="Launching scan...";
+    r=await fetch("/api/config/trigger-scan",{method:"POST",headers:{"Content-Type":"application/json"}});
+    d=await r.json();
+    msgEl.innerHTML='<div class="msg msg-ok">Setup complete! Redirecting to dashboard...</div>';
+    setTimeout(()=>{window.location.href="/dashboard";},1500);
+  }catch(e){
+    msgEl.innerHTML='<div class="msg msg-err">'+e.message+'</div>';
+    btn.disabled=false;btn.textContent="Save & Launch First Scan";
+  }
+}
+loadUserInfo();
+addCompetitor();
 </script>
 </body>
 </html>`;
@@ -1626,6 +1972,7 @@ const PARTNER_APPLY_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScopeHound — Partner Program</title>
+<script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
@@ -1684,6 +2031,7 @@ const PARTNER_DASHBOARD_HTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ScopeHound — Partner Dashboard</title>
+<script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.6}
@@ -1743,7 +2091,26 @@ else{fetch("/api/partner/stats?code="+code+"&email="+email).then(r=>r.json()).th
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runMonitor(env));
+    if (isHostedMode(env)) {
+      ctx.waitUntil((async () => {
+        const raw = await env.STATE.get("active_subscribers");
+        const list = raw ? JSON.parse(raw) : [];
+        for (const userId of list) {
+          try {
+            const uRaw = await env.STATE.get("user:" + userId);
+            if (!uRaw) continue;
+            const user = JSON.parse(uRaw);
+            if (user.subscriptionStatus !== "active") continue;
+            console.log(`Running scan for user ${user.email} (${user.tier})`);
+            await runMonitor(env, null, userId);
+          } catch (e) {
+            console.log(`Scan failed for user ${userId}: ${e.message}`);
+          }
+        }
+      })());
+    } else {
+      ctx.waitUntil(runMonitor(env));
+    }
   },
 
   async fetch(request, env) {
@@ -1792,7 +2159,15 @@ export default {
           if (!profile || !profile.email) return new Response("Failed to get user info", { status: 400 });
           const user = await findOrCreateUser(env, "google", profile, state.ref || null);
           const token = await createSession(env, user.id);
-          const headers = new Headers({ Location: url.origin + "/dashboard" });
+          // Smart redirect: billing → setup → dashboard
+          let dest = "/dashboard";
+          if (user.subscriptionStatus !== "active") {
+            dest = "/billing";
+          } else {
+            const comps = await env.STATE.get("user_config:" + user.id + ":competitors");
+            if (!comps || comps === "[]") dest = "/setup";
+          }
+          const headers = new Headers({ Location: url.origin + dest });
           setSessionCookie(headers, token);
           return new Response(null, { status: 302, headers });
         } catch (e) {
@@ -1832,7 +2207,7 @@ export default {
         try {
           const body = await request.json();
           const tier = body.tier;
-          if (!tier || !TIERS[tier] || TIERS[tier].price === 0) return jsonResponse({ error: "Invalid tier" }, 400);
+          if (!tier || !TIERS[tier]) return jsonResponse({ error: "Invalid tier" }, 400);
           const session = await createCheckoutSession(env, user, tier, url.origin);
           if (!session || !session.url) return jsonResponse({ error: session?.error?.message || "Failed to create checkout" }, 400);
           return jsonResponse({ url: session.url });
@@ -1930,6 +2305,12 @@ export default {
 
     // ── Setup wizard ──
     if (path === "/setup" || path === "/setup/") {
+      if (isHostedMode(env)) {
+        const user = await getSessionUser(request, env);
+        if (!user) return Response.redirect(url.origin + "/signin", 302);
+        if (user.subscriptionStatus !== "active") return Response.redirect(url.origin + "/billing", 302);
+        return new Response(HOSTED_SETUP_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      }
       return new Response(SETUP_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
     }
 
@@ -1938,6 +2319,9 @@ export default {
       if (isHostedMode(env)) {
         const user = await getSessionUser(request, env);
         if (!user) return Response.redirect(url.origin + "/signin", 302);
+        if (user.subscriptionStatus !== "active") return Response.redirect(url.origin + "/billing", 302);
+        const comps = await env.STATE.get("user_config:" + user.id + ":competitors");
+        if (!comps || comps === "[]") return Response.redirect(url.origin + "/setup", 302);
       }
       return new Response(DASHBOARD_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
     }
@@ -1947,7 +2331,9 @@ export default {
       let cacheKey = "dashboard_cache";
       if (isHostedMode(env)) {
         const user = await getSessionUser(request, env);
-        if (user) cacheKey = "user_state:" + user.id + ":dashboard";
+        if (!user) return jsonResponse({ error: "Not authenticated" }, 401);
+        if (user.subscriptionStatus !== "active") return jsonResponse({ error: "Subscription required" }, 402);
+        cacheKey = "user_state:" + user.id + ":dashboard";
       }
       const cache = await env.STATE.get(cacheKey);
       return new Response(cache || '{"competitors":[],"recentChanges":[]}', {
@@ -2035,7 +2421,7 @@ export default {
       if (response) return response;
       const userId = isHostedMode(env) ? user.id : null;
       const config = await loadConfig(env, userId);
-      const alerts = await runMonitor(env, config);
+      const alerts = await runMonitor(env, config, userId);
       return jsonResponse({ success: true, alertsSent: alerts.length });
     }
 
@@ -2048,6 +2434,20 @@ export default {
         if (!body.url) return jsonResponse({ error: "url required" }, 400);
         const feedUrl = await detectRssFeed(body.url);
         return jsonResponse({ found: !!feedUrl, feedUrl });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 400);
+      }
+    }
+
+    // ── Config API: Discover Pages ──
+    if (path === "/api/config/discover-pages" && request.method === "POST") {
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
+      try {
+        const body = await request.json();
+        if (!body.url) return jsonResponse({ error: "url required" }, 400);
+        const pages = await discoverPages(body.url);
+        return jsonResponse({ pages });
       } catch (e) {
         return jsonResponse({ error: e.message }, 400);
       }

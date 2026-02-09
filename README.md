@@ -80,7 +80,7 @@ Don't want to self-host? ScopeHound Cloud handles everything — no Cloudflare a
 
 | Plan | Competitors | Price |
 |------|-------------|-------|
-| Recon | 3 | Free |
+| Recon | 3 | $19.99/mo |
 | Operator | 15 | $49/mo |
 | Commander | 25 | $99/mo |
 | Strategic | 50 | $199/mo |
