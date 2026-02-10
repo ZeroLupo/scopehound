@@ -279,6 +279,19 @@
       color: var(--olive-light);
       margin-bottom: 24px;
     }
+    .rotate-word {
+      display: inline-block;
+      position: relative;
+      color: #c4a747;
+    }
+    .rotate-word .word {
+      display: inline-block;
+      animation: rotateIn 0.4s ease;
+    }
+    @keyframes rotateIn {
+      0% { opacity: 0; transform: translateY(12px); filter: blur(4px); }
+      100% { opacity: 1; transform: translateY(0); filter: blur(0); }
+    }
 
     .hero-subtitle {
       font-size: 18px;
@@ -863,7 +876,7 @@
   <!-- ============ HERO ============ -->
   <section class="hero" id="hero">
     <div class="container">
-      <h1 class="hero-headline">Your competitors changed<br>their pricing last night.<br>Check Slack.</h1>
+      <h1 class="hero-headline">Your competitors changed<br>their <span class="rotate-word"><span class="word" id="rotateWord">pricing</span></span> last night.<br>Check Slack.</h1>
       <p class="hero-subtitle">ScopeHound watches your competitors 24/7 and drops an AI-analyzed briefing into Slack every morning.</p>
       <p class="hero-desc">Pricing changes, feature updates, SEO shifts, blog posts, Product Hunt launches — monitored, analyzed, and delivered with what changed, why it matters, and what to do about it. Open source. $0 to self-host.</p>
       <div class="hero-actions">
@@ -1137,5 +1150,19 @@
     })();
   </script>
 
+<script>
+(function(){
+  const words=["pricing","blog","features","hiring plans","roadmap"];
+  let i=0;
+  const el=document.getElementById("rotateWord");
+  setInterval(()=>{
+    i=(i+1)%words.length;
+    el.style.animation="none";
+    el.offsetHeight;
+    el.textContent=words[i];
+    el.style.animation="rotateIn 0.4s ease";
+  },1000);
+})();
+</script>
 </body>
 </html>

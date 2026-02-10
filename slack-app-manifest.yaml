@@ -1,0 +1,28 @@
+display_information:
+  name: ScopeHound
+  description: AI-powered competitive intelligence delivered to Slack
+  background_color: "#5c6b3c"
+  long_description: "ScopeHound monitors your competitors 24/7 — pricing changes, feature updates, SEO shifts, blog posts, and Product Hunt launches — then delivers an AI-analyzed briefing to your Slack channel every morning."
+features:
+  bot_user:
+    display_name: ScopeHound
+    always_online: true
+  slash_commands:
+    - command: /scopehound
+      url: https://worker.scopehound.app/api/slack/commands
+      description: Manage your competitive intelligence
+      usage_hint: "[add <url> | list | remove <name> | scan | help]"
+      should_escape: false
+oauth_config:
+  redirect_urls:
+    - https://worker.scopehound.app/auth/slack/callback
+  scopes:
+    bot:
+      - incoming-webhook
+      - commands
+settings:
+  interactivity:
+    is_enabled: false
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

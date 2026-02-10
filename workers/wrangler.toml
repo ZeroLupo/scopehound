@@ -35,6 +35,7 @@ binding = "AI"
 #   STRIPE_PRICE_IDS     - JSON mapping tier names to Stripe Price IDs
 #                          e.g. {"recon":"price_xxx","operator":"price_yyy","commander":"price_zzz","strategic":"price_zzz"}
 #
-# SLACK OAUTH (optional, enables "Add to Slack" button):
+# SLACK OAUTH (optional, enables "Add to Slack" button + slash commands):
 #   SLACK_CLIENT_ID      - Slack app client ID
 #   SLACK_CLIENT_SECRET  - Slack app client secret
+#   SLACK_SIGNING_SECRET - Slack app signing secret (for verifying slash commands)

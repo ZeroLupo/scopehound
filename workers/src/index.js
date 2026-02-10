@@ -276,6 +276,50 @@ Return ONLY the JSON object.`;
   }
 }
 
+// ─── AI COMPETITOR DISCOVERY ────────────────────────────────────────────────
+
+async function discoverCompetitors(ai, companyUrl) {
+  const html = await fetchUrl(companyUrl);
+  if (!html) throw new Error("Could not fetch your website");
+  // Strip tags, keep text
+  const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 3000);
+  const domain = new URL(companyUrl).hostname.replace(/^www\./, "");
+  const prompt = `You are a competitive intelligence analyst. Based on this company's website text, identify their industry and list their top competitors.
+
+Company domain: ${domain}
+Website text:
+${text}
+
+Respond with ONLY valid JSON in this exact format:
+{"industry":"brief industry description","competitors":[{"name":"Company Name","url":"https://example.com","reason":"one sentence why they compete"}]}
+
+Rules:
+- List 5-8 competitors, ordered by relevance
+- Only include real, well-known companies with working websites
+- URLs must be full https:// URLs to the company homepage
+- Do NOT include ${domain} itself
+- Focus on direct competitors in the same market segment
+Return ONLY the JSON object.`;
+  const response = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: 800,
+  });
+  const content = response.response;
+  if (!content) return { industry: "Unknown", competitors: [] };
+  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    const parsed = JSON.parse(jsonMatch[0]);
+    // Validate URLs
+    parsed.competitors = (parsed.competitors || []).filter(c => {
+      try { new URL(c.url); return c.name && c.url; } catch { return false; }
+    });
+    return parsed;
+  }
+  return { industry: "Unknown", competitors: [] };
+}
+
 // ─── PRICING COMPARISON ─────────────────────────────────────────────────────
 
 function comparePricing(oldPricing, newPricing) {
@@ -785,14 +829,15 @@ async function discoverPages(websiteUrl) {
     }
     // Match against known patterns
     const patterns = [
-      { match: ["/pricing", "/plans", "/plan", "/price"], type: "pricing", label: "Pricing" },
-      { match: ["/blog", "/news", "/updates", "/changelog", "/articles"], type: "blog", label: "Blog" },
-      { match: ["/careers", "/jobs", "/hiring", "/join"], type: "careers", label: "Careers" },
-      { match: ["/features", "/product"], type: "general", label: "Features" },
+      { match: ["pricing", "plans", "plan", "price"], type: "pricing", label: "Pricing" },
+      { match: ["blog", "news", "updates", "changelog", "articles"], type: "blog", label: "Blog" },
+      { match: ["careers", "jobs", "hiring", "join", "work-with-us"], type: "careers", label: "Careers" },
+      { match: ["features", "product", "solutions"], type: "general", label: "Features" },
     ];
     for (const p of patterns) {
       for (const link of links) {
-        if (p.match.some(m => link.path === m || link.path === m + "/")) {
+        const segments = link.path.split("/").filter(Boolean);
+        if (p.match.some(m => segments.some(s => s === m || s.includes(m)))) {
           if (!seen.has(link.href)) {
             const entry = { url: link.href, type: p.type, label: p.label };
             if (p.type === "blog" && rssUrl) entry.rss = rssUrl;
@@ -812,9 +857,9 @@ async function discoverPages(websiteUrl) {
     }
     // If no pricing found, check common paths directly
     if (!pages.find(p => p.type === "pricing")) {
-      for (const tryPath of ["/pricing", "/plans"]) {
+      for (const tryPath of ["/pricing", "/plans", "/plans-pricing", "/pricing-plans"]) {
         try {
-          const r = await fetch(origin + tryPath, { method: "HEAD", headers: { "User-Agent": "Scopehound/3.0" }, redirect: "follow" });
+          const r = await fetch(origin + tryPath, { headers: { "User-Agent": "Scopehound/3.0" }, redirect: "follow" });
           if (r.ok) { pages.push({ url: origin + tryPath, type: "pricing", label: "Pricing" }); break; }
         } catch {}
       }
@@ -1354,6 +1399,7 @@ th{color:#6b7280;font-weight:600;font-size:11px;text-transform:uppercase;letter-
 <button data-tab="changes">Recent Changes</button>
 <button data-tab="pricing">Pricing</button>
 <button data-tab="seo">SEO Signals</button>
+<a href="/setup" style="margin-left:auto;font-size:12px;color:#6b7280;padding:8px 12px;border:1px solid #2a3038;border-radius:2px;text-decoration:none;display:flex;align-items:center;gap:4px">+ Manage Competitors</a>
 </nav>
 <main>
 <div id="content"><div class="loading">Loading dashboard data...</div></div>
@@ -1717,7 +1763,16 @@ async function loadProfile(){
   else{btn.textContent="Downgrade";btn.className="btn btn-secondary";}});
   if(u.stripeCustomerId)document.getElementById("manageSection").style.display="block";
   }catch(e){}
-  if(new URLSearchParams(location.search).get("success")){window.location.href="/setup";return;}
+  if(new URLSearchParams(location.search).get("success")){waitForSubscription();return;}
+}
+async function waitForSubscription(){
+  document.getElementById("planStatus").textContent="Activating your subscription...";
+  for(let i=0;i<20;i++){
+    await new Promise(r=>setTimeout(r,1500));
+    try{const r=await fetch("/api/user/profile");if(!r.ok)continue;const u=await r.json();
+    if(u.subscriptionStatus==="active"){window.location.href="/setup";return;}}catch(e){}
+  }
+  document.getElementById("planStatus").textContent="Subscription is processing. Please refresh in a moment.";
 }
 async function checkout(tier){try{const r=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
 async function manageSubscription(){try{const r=await fetch("/api/billing/portal",{method:"POST"});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
@@ -1781,6 +1836,36 @@ input:focus{outline:none;border-color:#5c6b3c}
 .review-item{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #1a1f25;font-size:14px}
 .review-label{color:#6b7280}
 .nav-btns{display:flex;justify-content:space-between;margin-top:24px}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+.scan-progress{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:16px;margin-top:12px}
+.scan-progress .scan-step{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;color:#6b7280;transition:color .3s}
+.scan-progress .scan-step.active{color:#7a8c52}
+.scan-progress .scan-step.done{color:#5c6b3c}
+.scan-progress .scan-step .dot{width:6px;height:6px;border-radius:50%;background:#2a3038;flex-shrink:0;transition:background .3s}
+.scan-progress .scan-step.active .dot{background:#7a8c52;animation:pulse 1.2s infinite}
+.scan-progress .scan-step.done .dot{background:#5c6b3c}
+.ai-discover{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:16px;margin-bottom:20px}
+.ai-discover h3{font-size:14px;margin-bottom:4px;color:#d4d8de}
+.ai-discover .ai-desc{font-size:12px;color:#6b7280;margin-bottom:12px}
+.ai-discover .ai-input{display:flex;gap:8px}
+.ai-discover .ai-input input{flex:1;margin:0}
+.ai-results{margin-top:12px}
+.ai-result{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid #2a3038;border-radius:2px;margin-bottom:6px;cursor:pointer;transition:border-color .2s}
+.ai-result:hover{border-color:#5c6b3c}
+.ai-result.selected{border-color:#7a8c52;background:#5c6b3c11}
+.ai-result input[type="checkbox"]{margin-top:3px;accent-color:#5c6b3c}
+.ai-result .ai-name{font-size:14px;font-weight:600;color:#d4d8de}
+.ai-result .ai-url{font-size:11px;color:#6b7280}
+.ai-result .ai-reason{font-size:12px;color:#6b7280;margin-top:2px}
+.ai-or{text-align:center;color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:0.1em;margin:16px 0;position:relative}
+.ai-or::before,.ai-or::after{content:"";position:absolute;top:50%;width:calc(50% - 20px);height:1px;background:#2a3038}
+.ai-or::before{left:0}
+.ai-or::after{right:0}
+@keyframes aiThink{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.ai-thinking{padding:24px;text-align:center}
+.ai-thinking .ai-brain{font-size:13px;color:#7a8c52;margin-bottom:8px}
+.ai-thinking .ai-bar{height:3px;border-radius:2px;background:linear-gradient(90deg,#12161a 0%,#5c6b3c 50%,#12161a 100%);background-size:200% 100%;animation:aiThink 1.5s ease-in-out infinite}
+.ai-thinking .ai-status{font-size:12px;color:#6b7280;margin-top:8px}
 @media(max-width:600px){.steps{flex-direction:column}}
 </style>
 </head>
@@ -1803,7 +1888,7 @@ input:focus{outline:none;border-color:#5c6b3c}
 </div>
 <div id="slackNotConnected">
 <div style="margin:24px 0;text-align:center">
-<a href="/auth/slack" class="btn btn-primary" style="display:inline-flex;align-items:center;gap:10px;padding:14px 28px;font-size:14px">
+<a href="#" onclick="window.open('/auth/slack','slackauth','width=600,height=700,left='+((screen.width-600)/2)+',top='+((screen.height-700)/2));return false" class="btn btn-primary" style="display:inline-flex;align-items:center;gap:10px;padding:14px 28px;font-size:14px">
 <svg width="20" height="20" viewBox="0 0 123 123" fill="none"><path d="M25.8 77.6a12.9 12.9 0 1 1-12.9-12.9h12.9v12.9zm6.5 0a12.9 12.9 0 1 1 25.8 0v32.3a12.9 12.9 0 1 1-25.8 0V77.6z" fill="#E01E5A"/><path d="M45.2 25.8a12.9 12.9 0 1 1 12.9-12.9v12.9H45.2zm0 6.5a12.9 12.9 0 1 1 0 25.8H12.9a12.9 12.9 0 0 1 0-25.8h32.3z" fill="#36C5F0"/><path d="M97.2 45.2a12.9 12.9 0 1 1 12.9 12.9H97.2V45.2zm-6.5 0a12.9 12.9 0 1 1-25.8 0V12.9a12.9 12.9 0 1 1 25.8 0v32.3z" fill="#2EB67D"/><path d="M77.8 97.2a12.9 12.9 0 1 1-12.9 12.9V97.2h12.9zm0-6.5a12.9 12.9 0 1 1 0-25.8h32.3a12.9 12.9 0 0 1 0 25.8H77.8z" fill="#ECB22E"/></svg>
 Add to Slack
 </a>
@@ -1829,6 +1914,16 @@ Add to Slack
 <div class="panel" id="panel2">
 <h2>Add Competitors</h2>
 <div class="tier-info" id="tierInfo"></div>
+<div class="ai-discover" id="aiDiscover">
+<h3>Find My Competitors</h3>
+<p class="ai-desc">Enter your company URL and our AI will identify your competitors automatically.</p>
+<div class="ai-input">
+<input type="url" id="myCompanyUrl" placeholder="yourcompany.com">
+<button class="btn btn-primary btn-sm" onclick="findCompetitors()">Find Competitors</button>
+</div>
+<div id="aiResults"></div>
+</div>
+<div class="ai-or">or add manually</div>
 <div id="compList"></div>
 <button class="btn btn-secondary btn-sm" onclick="addCompetitor()" id="addCompBtn">+ Add Competitor</button>
 <div class="nav-btns">
@@ -1876,14 +1971,30 @@ async function loadUserInfo(){
     const ch=c.settings.slackChannel;
     document.getElementById("slackStatus").textContent="Connected to Slack"+(ch?" (#"+ch+")":"")+"!";
   }}}catch(e){}
+  // Load existing competitors if returning to setup
+  try{const r=await fetch("/api/config");if(r.ok){const c=await r.json();
+  if(c.competitors&&c.competitors.length>0){
+    competitors=c.competitors.map(comp=>({name:comp.name,website:comp.website,blogRss:comp.blogRss||null,pages:comp.pages||[],_discovered:comp.pages?comp.pages.map(p=>({url:p.url,type:p.type,label:p.label})):[]
+    }));renderCompetitors();
+  }}}catch(e){}
 }
+window.addEventListener("message",function(e){
+  if(e.data&&e.data.type==="slack-connected"){
+    slackVerified=true;
+    document.getElementById("slackConnected").style.display="block";
+    document.getElementById("slackNotConnected").style.display="none";
+    document.getElementById("slackNext").disabled=false;
+    document.getElementById("skipLink").style.display="none";
+    document.getElementById("slackStatus").textContent="Connected to Slack"+(e.data.channel?" (#"+e.data.channel+")":"")+"!";
+  }
+});
 function goStep(n){
   if(n===2&&!slackVerified&&!slackSkipped){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Connect Slack or click Skip for now.</div>';return;}
   if(n===3&&competitors.length===0){alert("Add at least one competitor.");return;}
   currentStep=n;
   document.querySelectorAll(".panel").forEach((p,i)=>{p.classList.toggle("active",i===n-1);});
   document.querySelectorAll(".step-tab").forEach((t,i)=>{t.className="step-tab"+(i===n-1?" active":i<n-1?" done":"");});
-  if(n===3)renderReview();
+  if(n===3){document.getElementById("launchMsg").innerHTML="";renderReview();}
 }
 function skipSlack(){slackSkipped=true;goStep(2);}
 async function testSlack(){
@@ -1901,10 +2012,70 @@ async function testSlack(){
   }else{document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+(d.error||"Failed to connect.")+'</div>';}
   }catch(e){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
 }
+let aiSuggestions=[];
+async function findCompetitors(){
+  const el=document.getElementById("aiResults");
+  let u=document.getElementById("myCompanyUrl").value.trim();
+  if(!u){el.innerHTML='<div class="msg msg-err">Enter your company URL.</div>';return;}
+  if(!/^https?:\/\//i.test(u))u="https://"+u;
+  document.getElementById("myCompanyUrl").value=u;
+  el.innerHTML='<div class="ai-thinking"><div class="ai-brain">Analyzing your website...</div><div class="ai-bar"></div><div class="ai-status">Identifying industry and finding competitors</div></div>';
+  // Animate status text
+  const statuses=["Reading your homepage...","Identifying your industry...","Finding competitors in your space...","Ranking by relevance..."];
+  let si=0;
+  const statusInterval=setInterval(()=>{
+    si=(si+1)%statuses.length;
+    const s=el.querySelector(".ai-status");if(s)s.textContent=statuses[si];
+  },2000);
+  try{
+    const r=await fetch("/api/config/discover-competitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u})});
+    clearInterval(statusInterval);
+    const d=await r.json();
+    if(d.error){el.innerHTML='<div class="msg msg-err">'+d.error+'</div>';return;}
+    aiSuggestions=d.competitors||[];
+    if(aiSuggestions.length===0){el.innerHTML='<div class="msg">No competitors found. Try adding them manually below.</div>';return;}
+    let html='<div style="font-size:12px;color:#6b7280;margin:12px 0 8px">Industry: <strong style="color:#7a8c52">'+((d.industry||"").charAt(0).toUpperCase()+(d.industry||"").slice(1))+'</strong> — Select competitors to add:</div>';
+    html+=aiSuggestions.map((c,i)=>'<div class="ai-result" onclick="toggleAiResult(this,'+i+')"><input type="checkbox" id="aicheck'+i+'"><div><div class="ai-name">'+c.name+'</div><div class="ai-url">'+c.url+'</div><div class="ai-reason">'+c.reason+'</div></div></div>').join("");
+    html+='<button class="btn btn-primary btn-sm" onclick="addSelectedAi()" style="margin-top:12px" id="addAiBtn" disabled>Add Selected Competitors</button>';
+    el.innerHTML=html;
+  }catch(e){clearInterval(statusInterval);el.innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
+}
+function toggleAiResult(el,idx){
+  el.classList.toggle("selected");
+  const cb=document.getElementById("aicheck"+idx);cb.checked=!cb.checked;
+  const any=aiSuggestions.some((_,i)=>document.getElementById("aicheck"+i)?.checked);
+  document.getElementById("addAiBtn").disabled=!any;
+}
+async function addSelectedAi(){
+  const selected=aiSuggestions.filter((_,i)=>document.getElementById("aicheck"+i)?.checked);
+  const lim=window._tierLimits;
+  const remaining=lim?(lim.c-competitors.length):99;
+  if(selected.length>remaining){alert("You can only add "+remaining+" more competitor"+(remaining===1?"":"s")+" on your plan.");return;}
+  const btn=document.getElementById("addAiBtn");
+  btn.disabled=true;btn.textContent="Scanning pages...";
+  for(const s of selected){
+    const idx=competitors.length;
+    competitors.push({name:s.name,website:s.url,pages:[],blogRss:null,_discovered:[]});
+    renderCompetitors();
+    // Auto-scan each
+    try{
+      const r=await fetch("/api/config/discover-pages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:s.url})});
+      const d=await r.json();
+      if(d.pages){
+        competitors[idx]._discovered=d.pages;
+        competitors[idx].pages=d.pages.map((p,pi)=>({id:p.type+"-"+pi,url:p.url,type:p.type,label:p.label}));
+        if(d.pages.find(p=>p.rss))competitors[idx].blogRss=d.pages.find(p=>p.rss).rss;
+      }
+    }catch(e){}
+    renderCompetitors();
+  }
+  btn.textContent="Added!";
+  document.getElementById("aiDiscover").style.display="none";
+  document.querySelector(".ai-or").style.display="none";
+}
 function addCompetitor(){
   const lim=window._tierLimits;
   if(lim&&competitors.length>=lim.c){alert("You've reached your plan limit of "+lim.c+" competitors.");return;}
-  const idx=competitors.length;
   competitors.push({name:"",website:"",pages:[],blogRss:null});
   renderCompetitors();
 }
@@ -1943,9 +2114,15 @@ function togglePage(ci,pi,on){
     competitors[ci].pages=competitors[ci].pages.filter(x=>x.url!==disc.url);
   }
 }
+function normalizeUrl(u){
+  u=u.trim();if(!u)return u;
+  if(!/^https?:\/\//i.test(u))u="https://"+u;
+  return u;
+}
 async function scanSite(idx){
-  const u=document.getElementById("url"+idx).value.trim();
+  let u=normalizeUrl(document.getElementById("url"+idx).value);
   if(!u){alert("Enter a URL first.");return;}
+  document.getElementById("url"+idx).value=u;
   competitors[idx].website=u;
   document.getElementById("pages"+idx).innerHTML='<p class="scanning" style="margin-top:8px">Scanning '+u+'...</p>';
   try{const r=await fetch("/api/config/discover-pages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u})});
@@ -1958,13 +2135,25 @@ async function scanSite(idx){
   }else{document.getElementById("pages"+idx).innerHTML='<p class="msg msg-err">Could not scan site.</p>';}
   }catch(e){document.getElementById("pages"+idx).innerHTML='<p class="msg msg-err">'+e.message+'</p>';}
 }
+function detectPageType(u){
+  try{const p=new URL(u).pathname.toLowerCase();}catch(e){return{type:"general",label:"Custom"};}
+  const p=new URL(u).pathname.toLowerCase();
+  if(/\\/(pricing|plans|price|plans-pricing)/.test(p))return{type:"pricing",label:"Pricing"};
+  if(/\\/(blog|news|updates|changelog|articles)/.test(p))return{type:"blog",label:"Blog"};
+  if(/\\/(careers|jobs|hiring|join)/.test(p))return{type:"careers",label:"Careers"};
+  if(/\\/(features|product|solutions)/.test(p))return{type:"general",label:"Features"};
+  if(/\\/(about|company|team)/.test(p))return{type:"general",label:"About"};
+  if(/\\/(docs|documentation|support|help)/.test(p))return{type:"general",label:"Docs"};
+  return{type:"general",label:"Custom"};
+}
 function addCustomPage(idx){
   const input=document.getElementById("custom"+idx);
-  const u=input.value.trim();if(!u)return;
-  const entry={id:"custom-"+competitors[idx].pages.length,url:u,type:"general",label:"Custom"};
+  const u=normalizeUrl(input.value);if(!u)return;
+  const detected=detectPageType(u);
+  const entry={id:"custom-"+competitors[idx].pages.length,url:u,type:detected.type,label:detected.label};
   competitors[idx].pages.push(entry);
   if(!competitors[idx]._discovered)competitors[idx]._discovered=[];
-  competitors[idx]._discovered.push({url:u,type:"general",label:"Custom"});
+  competitors[idx]._discovered.push({url:u,type:detected.type,label:detected.label});
   input.value="";
   document.getElementById("pages"+idx).innerHTML=renderPageCheckboxes(idx);
 }
@@ -1977,21 +2166,39 @@ function renderReview(){
     +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"recon").charAt(0).toUpperCase()+(window._tier||"recon").slice(1)+'</span></div>'
     +'<div class="review-item"><span class="review-label">Schedule</span><span>Daily at 9am UTC</span></div>';
 }
+function scanProgress(steps){
+  return '<div class="scan-progress">'+steps.map((s,i)=>
+    '<div class="scan-step'+s.state+'" id="scanStep'+i+'"><span class="dot"></span>'+s.text+'</div>'
+  ).join("")+'</div>';
+}
+function setScanStep(idx,state){
+  const el=document.getElementById("scanStep"+idx);if(!el)return;
+  el.className="scan-step"+(state==="active"?" active":state==="done"?" done":"");
+}
 async function launch(){
-  const btn=document.getElementById("launchBtn");btn.disabled=true;btn.textContent="Saving...";
+  const btn=document.getElementById("launchBtn");btn.disabled=true;btn.textContent="Launching...";
   const msgEl=document.getElementById("launchMsg");
+  const steps=[
+    {text:"Saving competitor config...",state:""},
+    {text:"Saving Slack settings...",state:""},
+    {text:"Scanning competitor pages...",state:""},
+    {text:"Analyzing with AI...",state:""},
+    {text:"Preparing dashboard...",state:""}
+  ];
+  msgEl.innerHTML=scanProgress(steps);
+  setScanStep(0,"active");
   try{
     const comps=competitors.map(c=>({name:c.name,website:c.website,blogRss:c.blogRss||null,pages:c.pages.map(p=>({id:p.id,url:p.url,type:p.type,label:p.label}))}));
-    // Save competitors
     let r=await fetch("/api/config/competitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({competitors:comps})});
     let d=await r.json();if(!r.ok){throw new Error(d.error||"Failed to save competitors");}
-    // Save settings
+    setScanStep(0,"done");setScanStep(1,"active");
     r=await fetch("/api/config/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slackWebhookUrl:document.getElementById("slackUrl").value.trim()})});
     d=await r.json();if(!r.ok){throw new Error(d.error||"Failed to save settings");}
-    // Trigger scan
-    btn.textContent="Launching scan...";
+    setScanStep(1,"done");setScanStep(2,"active");
+    btn.textContent="Scanning...";
     r=await fetch("/api/config/trigger-scan",{method:"POST",headers:{"Content-Type":"application/json"}});
     d=await r.json();
+    setScanStep(2,"done");setScanStep(3,"done");setScanStep(4,"done");
     msgEl.innerHTML='<div class="msg msg-ok">Setup complete! Redirecting to dashboard...</div>';
     setTimeout(()=>{window.location.href="/dashboard";},1500);
   }catch(e){
@@ -2154,7 +2361,7 @@ export default {
     }
   },
 
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -2272,13 +2479,124 @@ export default {
           settings.slackWebhookUrl = tokenData.incoming_webhook.url;
           settings.slackChannel = tokenData.incoming_webhook.channel;
           settings.slackTeam = tokenData.team?.name || null;
+          settings.slackTeamId = tokenData.team?.id || null;
           await env.STATE.put(prefix + "settings", JSON.stringify(settings));
+          // Map Slack team → ScopeHound user for slash commands
+          if (tokenData.team?.id) {
+            await env.STATE.put("slack_team:" + tokenData.team.id, userId);
+          }
           // Send test message
           await sendSlack(tokenData.incoming_webhook.url, "ScopeHound is connected to #" + (tokenData.incoming_webhook.channel || "your channel") + ". You're all set!");
-          return Response.redirect(url.origin + "/setup?slack=connected", 302);
+          // If opened in popup, notify parent and close; otherwise redirect
+          const popupHTML = `<!DOCTYPE html><html><body><script>
+            if(window.opener){window.opener.postMessage({type:"slack-connected",channel:"${(tokenData.incoming_webhook.channel||"").replace(/"/g,"")}"},"*");window.close();}
+            else{location.href="/setup?slack=connected";}
+          </script><p>Connected! You can close this window.</p></body></html>`;
+          return new Response(popupHTML, { headers: { "Content-Type": "text/html" } });
         } catch (e) {
           return new Response("Slack auth error: " + e.message, { status: 500 });
         }
+      }
+
+      // ── Slack slash commands ──
+      if (path === "/api/slack/commands" && request.method === "POST") {
+        if (!env.SLACK_SIGNING_SECRET) return new Response("Not configured", { status: 500 });
+        const rawBody = await request.text();
+        const timestamp = request.headers.get("x-slack-request-timestamp");
+        const slackSig = request.headers.get("x-slack-signature");
+        if (!timestamp || !slackSig) return new Response("Unauthorized", { status: 401 });
+        if (Math.abs(Date.now() / 1000 - parseInt(timestamp)) > 300) return new Response("Expired", { status: 401 });
+        const enc = new TextEncoder();
+        const key = await crypto.subtle.importKey("raw", enc.encode(env.SLACK_SIGNING_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+        const mac = await crypto.subtle.sign("HMAC", key, enc.encode("v0:" + timestamp + ":" + rawBody));
+        const expected = "v0=" + Array.from(new Uint8Array(mac)).map(b => b.toString(16).padStart(2, "0")).join("");
+        if (expected !== slackSig) return new Response("Invalid signature", { status: 401 });
+
+        const params = new URLSearchParams(rawBody);
+        const text = (params.get("text") || "").trim();
+        const teamId = params.get("team_id");
+        const responseUrl = params.get("response_url");
+
+        // Find the ScopeHound user for this Slack team
+        const userId = await env.STATE.get("slack_team:" + teamId);
+        if (!userId) {
+          return jsonResponse({ response_type: "ephemeral", text: "This Slack workspace isn't linked to a ScopeHound account. Visit worker.scopehound.app/setup to connect." });
+        }
+        const userRaw = await env.STATE.get("user:" + userId);
+        if (!userRaw) return jsonResponse({ response_type: "ephemeral", text: "Account not found." });
+        const user = JSON.parse(userRaw);
+
+        if (!text || text === "help") {
+          return jsonResponse({ response_type: "ephemeral", text: "*ScopeHound Commands*\n`/scopehound add <url>` — Add a competitor\n`/scopehound list` — List your competitors\n`/scopehound remove <name>` — Remove a competitor\n`/scopehound scan` — Trigger a manual scan" });
+        }
+
+        const prefix = "user_config:" + userId + ":";
+        const compsRaw = await env.STATE.get(prefix + "competitors");
+        let comps = compsRaw ? JSON.parse(compsRaw) : [];
+
+        if (text === "list") {
+          if (comps.length === 0) return jsonResponse({ response_type: "ephemeral", text: "No competitors configured. Use `/scopehound add <url>` to add one." });
+          const list = comps.map((c, i) => `${i + 1}. *${c.name}* — ${c.website} (${c.pages.length} pages)`).join("\n");
+          return jsonResponse({ response_type: "ephemeral", text: "*Your Competitors*\n" + list });
+        }
+
+        if (text.startsWith("add ")) {
+          let compUrl = text.slice(4).trim();
+          if (!/^https?:\/\//i.test(compUrl)) compUrl = "https://" + compUrl;
+          const limits = getTierLimits(user.tier || "recon");
+          if (comps.length >= limits.competitors) {
+            return jsonResponse({ response_type: "ephemeral", text: `You've reached your ${limits.name} plan limit of ${limits.competitors} competitors. Upgrade at worker.scopehound.app/billing` });
+          }
+          // Respond immediately, then process async
+          const immediate = jsonResponse({ response_type: "ephemeral", text: `Scanning ${compUrl}... I'll update you in a moment.` });
+
+          // Process in background
+                    ctx.waitUntil((async () => {
+            try {
+              const pages = await discoverPages(compUrl);
+              const totalPages = comps.reduce((n, c) => n + (c.pages?.length || 0), 0) + pages.length;
+              if (totalPages > limits.pages) {
+                await fetch(responseUrl, { method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ response_type: "ephemeral", text: `Adding ${compUrl} would put you at ${totalPages} pages (limit: ${limits.pages}). Remove some pages or upgrade.` }) });
+                return;
+              }
+              let hostname;
+              try { hostname = new URL(compUrl).hostname.replace(/^www\./, ""); } catch { hostname = compUrl; }
+              const name = hostname.split(".")[0].charAt(0).toUpperCase() + hostname.split(".")[0].slice(1);
+              const newComp = { name, website: compUrl, blogRss: pages.find(p => p.rss)?.rss || null,
+                pages: pages.map((p, i) => ({ id: p.type + "-" + i, url: p.url, type: p.type, label: p.label })) };
+              comps.push(newComp);
+              await env.STATE.put(prefix + "competitors", JSON.stringify(comps));
+              const pageList = newComp.pages.map(p => `  • ${p.label}: ${p.url}`).join("\n");
+              await fetch(responseUrl, { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ response_type: "ephemeral", text: `Added *${name}* with ${newComp.pages.length} pages:\n${pageList}` }) });
+            } catch (e) {
+              await fetch(responseUrl, { method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ response_type: "ephemeral", text: "Error adding competitor: " + e.message }) });
+            }
+          })());
+          return immediate;
+        }
+
+        if (text.startsWith("remove ")) {
+          const name = text.slice(7).trim().toLowerCase();
+          const idx = comps.findIndex(c => c.name.toLowerCase() === name || c.website.toLowerCase().includes(name));
+          if (idx === -1) return jsonResponse({ response_type: "ephemeral", text: `Competitor "${text.slice(7).trim()}" not found. Use \`/scopehound list\` to see your competitors.` });
+          const removed = comps.splice(idx, 1)[0];
+          await env.STATE.put(prefix + "competitors", JSON.stringify(comps));
+          return jsonResponse({ response_type: "ephemeral", text: `Removed *${removed.name}* (${removed.website}).` });
+        }
+
+        if (text === "scan") {
+          const config = await loadConfig(env, userId);
+          jsonResponse({ response_type: "ephemeral", text: "Starting scan... Results will appear in your channel." });
+          ctx.waitUntil((async () => {
+            await runMonitor(env, config, userId);
+          })());
+          return jsonResponse({ response_type: "ephemeral", text: "Scan triggered. Results will appear shortly." });
+        }
+
+        return jsonResponse({ response_type: "ephemeral", text: "Unknown command. Try `/scopehound help`." });
       }
 
       // ── User profile ──
@@ -2533,6 +2851,22 @@ export default {
         if (!body.url) return jsonResponse({ error: "url required" }, 400);
         const feedUrl = await detectRssFeed(body.url);
         return jsonResponse({ found: !!feedUrl, feedUrl });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 400);
+      }
+    }
+
+    // ── Config API: Discover Competitors (AI) ──
+    if (path === "/api/config/discover-competitors" && request.method === "POST") {
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
+      try {
+        const body = await request.json();
+        if (!body.url) return jsonResponse({ error: "url required" }, 400);
+        let compUrl = body.url.trim();
+        if (!/^https?:\/\//i.test(compUrl)) compUrl = "https://" + compUrl;
+        const result = await discoverCompetitors(env.AI, compUrl);
+        return jsonResponse(result);
       } catch (e) {
         return jsonResponse({ error: e.message }, 400);
       }
