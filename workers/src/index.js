@@ -1960,7 +1960,7 @@ async function loadUserInfo(){
     document.getElementById("slackNext").disabled=false;
     document.getElementById("skipLink").style.display="none";
   }
-  // Check if Slack is already configured
+  // Load existing config (Slack + competitors)
   try{const r=await fetch("/api/config");if(r.ok){const c=await r.json();
   if(c.settings&&c.settings.slackWebhookUrl){
     slackVerified=true;
@@ -1970,13 +1970,14 @@ async function loadUserInfo(){
     document.getElementById("skipLink").style.display="none";
     const ch=c.settings.slackChannel;
     document.getElementById("slackStatus").textContent="Connected to Slack"+(ch?" (#"+ch+")":"")+"!";
-  }}}catch(e){}
-  // Load existing competitors if returning to setup
-  try{const r=await fetch("/api/config");if(r.ok){const c=await r.json();
+  }
   if(c.competitors&&c.competitors.length>0){
     competitors=c.competitors.map(comp=>({name:comp.name,website:comp.website,blogRss:comp.blogRss||null,pages:comp.pages||[],_discovered:comp.pages?comp.pages.map(p=>({url:p.url,type:p.type,label:p.label})):[]
     }));renderCompetitors();
-  }}}catch(e){}
+  }
+  // Auto-advance past Slack if already connected
+  if(slackVerified)goStep(2);
+  }}catch(e){}
 }
 window.addEventListener("message",function(e){
   if(e.data&&e.data.type==="slack-connected"){
@@ -2377,8 +2378,27 @@ export default {
     // ══════════════════════════════════════════════════════════════════════════
 
     if (isHostedMode(env)) {
+      // ── Root redirect ──
+      if (path === "/" || path === "") {
+        const user = await getSessionUser(request, env);
+        if (user) {
+          if (user.subscriptionStatus !== "active") return Response.redirect(url.origin + "/billing", 302);
+          const comps = await env.STATE.get("user_config:" + user.id + ":competitors");
+          if (!comps || comps === "[]") return Response.redirect(url.origin + "/setup", 302);
+          return Response.redirect(url.origin + "/dashboard", 302);
+        }
+        return Response.redirect(url.origin + "/signin", 302);
+      }
+
       // ── Sign-in page ──
       if (path === "/signin" || path === "/signin/") {
+        const user = await getSessionUser(request, env);
+        if (user) {
+          if (user.subscriptionStatus !== "active") return Response.redirect(url.origin + "/billing", 302);
+          const comps = await env.STATE.get("user_config:" + user.id + ":competitors");
+          if (!comps || comps === "[]") return Response.redirect(url.origin + "/setup", 302);
+          return Response.redirect(url.origin + "/dashboard", 302);
+        }
         return new Response(SIGNIN_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
       }
 
