@@ -1,0 +1,2 @@
+# Redirect pages.dev to custom domain
+https://scopehound.pages.dev/* https://scopehound.app/:splat 301
