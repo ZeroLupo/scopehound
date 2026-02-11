@@ -39,3 +39,7 @@ binding = "AI"
 #   SLACK_CLIENT_ID      - Slack app client ID
 #   SLACK_CLIENT_SECRET  - Slack app client secret
 #   SLACK_SIGNING_SECRET - Slack app signing secret (for verifying slash commands)
+#
+# AD LIBRARY (optional, enables /ads command with live Meta data):
+#   META_APP_TOKEN       - Meta (Facebook) app access token with ads_library permission
+#                          Without this, /ads still works but only generates search links

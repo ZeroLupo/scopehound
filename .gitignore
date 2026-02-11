@@ -15,6 +15,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Test artifacts
+test-results/
+
 # Environment / secrets
 .env
 .env.*

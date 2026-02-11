@@ -278,42 +278,144 @@ Return ONLY the JSON object.`;
 
 // ─── AI COMPETITOR DISCOVERY ────────────────────────────────────────────────
 
-async function discoverCompetitors(ai, companyUrl) {
+async function searchDDG(query) {
+  try {
+    const r = await fetch("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query), {
+      headers: { "User-Agent": "Scopehound/3.0 (Competitive Intelligence)" },
+    });
+    if (!r.ok) return [];
+    const html = await r.text();
+    const results = [];
+    const snippetRegex = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+    const titleRegex = /<a class="result__a"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = snippetRegex.exec(html)) !== null && results.length < 15) {
+      results.push(m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
+    }
+    while ((m = titleRegex.exec(html)) !== null && results.length < 20) {
+      results.push(m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
+    }
+    return results;
+  } catch (e) { console.log(`Search error: ${e.message}`); return []; }
+}
+
+function extractPageMeta(html) {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : "";
+  const metaDesc = (html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ||
+    html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i) || [])[1] || "";
+  const ogDesc = (html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i) ||
+    html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:description["']/i) || [])[1] || "";
+  const headings = [];
+  const hRegex = /<h[12][^>]*>([\s\S]*?)<\/h[12]>/gi;
+  let hMatch;
+  while ((hMatch = hRegex.exec(html)) !== null && headings.length < 4) {
+    const h = hMatch[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    if (h.length > 3 && h.length < 200) headings.push(h);
+  }
+  return { title, metaDesc, ogDesc, headings };
+}
+
+async function discoverCompetitors(ai, companyUrl, seedCompetitors) {
   const html = await fetchUrl(companyUrl);
   if (!html) throw new Error("Could not fetch your website");
-  // Strip tags, keep text
+  const meta = extractPageMeta(html);
   const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 3000);
+    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 2000);
   const domain = new URL(companyUrl).hostname.replace(/^www\./, "");
-  const prompt = `You are a competitive intelligence analyst. Based on this company's website text, identify their industry and list their top competitors.
+  const companyName = meta.title.split(/[|\-–—]/)[0].trim() || domain.split(".")[0];
+
+  // Build search queries from the main domain + seed competitors
+  const seeds = (seedCompetitors || []).filter(Boolean);
+  const seedDomains = seeds.map(s => {
+    try { return new URL(s.startsWith("http") ? s : "https://" + s).hostname.replace(/^www\./, ""); } catch { return s; }
+  });
+  const allDomains = [domain, ...seedDomains];
+
+  // Fetch seed competitor homepages for context
+  const seedDescriptions = [];
+  for (const sd of seedDomains.slice(0, 2)) {
+    try {
+      const seedHtml = await fetchUrl("https://" + sd);
+      if (seedHtml) {
+        const sm = extractPageMeta(seedHtml);
+        const desc = sm.metaDesc || sm.ogDesc || sm.title;
+        if (desc) seedDescriptions.push(`${sd}: ${desc}`);
+      }
+    } catch {}
+  }
+
+  // Search for alternatives to each reference point
+  const searchResults = [];
+  const searchQueries = [
+    `${domain} competitors alternatives`,
+    `${companyName} alternatives`,
+  ];
+  for (const sd of seedDomains) {
+    const seedName = sd.split(".")[0];
+    searchQueries.push(`${sd} alternatives competitors`);
+    searchQueries.push(`${seedName} vs`);
+  }
+  // Run up to 4 searches (main domain + seeds)
+  for (const q of searchQueries.slice(0, 4)) {
+    const r = await searchDDG(q);
+    searchResults.push(...r);
+  }
+  const webContext = searchResults.join("\n").slice(0, 3500);
+
+  const structuredCtx = [
+    meta.title && `Title: ${meta.title}`,
+    meta.metaDesc && `Meta description: ${meta.metaDesc}`,
+    meta.ogDesc && meta.ogDesc !== meta.metaDesc && `OG description: ${meta.ogDesc}`,
+    meta.headings.length && `Key headings: ${meta.headings.join(" | ")}`,
+  ].filter(Boolean).join("\n");
+
+  const seedSection = seeds.length > 0
+    ? `\nKnown competitors (provided by user): ${seedDomains.join(", ")}${seedDescriptions.length ? "\n" + seedDescriptions.join("\n") : ""}\nUse these as reference points — find MORE companies like them.\n`
+    : "";
+
+  const excludeList = allDomains.map(d => d).join(", ");
+
+  const prompt = `You are a competitive intelligence analyst. Find direct competitors for this company.
 
 Company domain: ${domain}
-Website text:
-${text}
+${structuredCtx}
 
+Website text (excerpt):
+${text}
+${seedSection}
+${webContext ? `Web search results about competitors/alternatives:\n${webContext}\n` : ""}
 Respond with ONLY valid JSON in this exact format:
 {"industry":"brief industry description","competitors":[{"name":"Company Name","url":"https://example.com","reason":"one sentence why they compete"}]}
 
 Rules:
-- List 5-8 competitors, ordered by relevance
-- Only include real, well-known companies with working websites
+- List 8-12 competitors, ordered by how directly they compete
+- PRIORITIZE companies mentioned in the web search results — they are real, verified competitors
+- Focus on direct competitors: same problem, same audience, same product category
+- Include startups, niche players, and newer entrants — not just industry giants
 - URLs must be full https:// URLs to the company homepage
-- Do NOT include ${domain} itself
-- Focus on direct competitors in the same market segment
+- Do NOT include any of these domains: ${excludeList}
+- Do NOT include generic platforms (CrunchBase, G2, LinkedIn, etc.) — only actual competing products
+- Every result must be a company that a customer would evaluate as an alternative
 Return ONLY the JSON object.`;
   const response = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
     messages: [{ role: "user", content: prompt }],
-    max_tokens: 800,
+    max_tokens: 1200,
   });
   const content = response.response;
   if (!content) return { industry: "Unknown", competitors: [] };
   const jsonMatch = content.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     const parsed = JSON.parse(jsonMatch[0]);
-    // Validate URLs
+    const blocklist = ["crunchbase.com", "g2.com", "linkedin.com", "twitter.com", "facebook.com", "wikipedia.org", "youtube.com", "github.com", "producthunt.com", "trustpilot.com", "capterra.com"];
     parsed.competitors = (parsed.competitors || []).filter(c => {
-      try { new URL(c.url); return c.name && c.url; } catch { return false; }
+      try {
+        const u = new URL(c.url);
+        if (blocklist.some(b => u.hostname.includes(b))) return false;
+        if (allDomains.includes(u.hostname.replace(/^www\./, ""))) return false;
+        return c.name && c.url;
+      } catch { return false; }
     });
     return parsed;
   }
@@ -447,7 +549,7 @@ function formatDigestHeader(alerts) {
   if (m) parts.push(`${m} medium`);
   if (l) parts.push(`${l} low`);
   const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-  return `🐕 *ScopeHound Daily Report* — ${date}\n\n${alerts.length} change(s) detected: ${parts.join(", ")}`;
+  return `🐺 *ScopeHound Daily Report* — ${date}\n\n${alerts.length} change(s) detected: ${parts.join(", ")}`;
 }
 
 // ─── SLACK NOTIFICATION ─────────────────────────────────────────────────────
@@ -480,6 +582,128 @@ async function fetchProductHuntPosts(topic, token) {
     if (data.errors) return [];
     return data.data.posts.edges.map((e) => e.node);
   } catch (e) { console.log(`  PH error: ${e.message}`); return []; }
+}
+
+// ─── AD LIBRARY LOOKUP ──────────────────────────────────────────────────────
+
+async function fetchMetaAds(domain, companyName, metaToken, env) {
+  // Check cache first (6 hour TTL)
+  const cacheKey = "ads:meta:" + domain;
+  const cached = await env.STATE.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  if (!metaToken) return null;
+
+  // Search Meta Ad Library by company name
+  const searchName = companyName || domain.split(".")[0];
+  const params = new URLSearchParams({
+    access_token: metaToken,
+    search_terms: searchName,
+    ad_reached_countries: "US",
+    ad_active_status: "ACTIVE",
+    ad_type: "ALL",
+    fields: "ad_creative_bodies,ad_creative_link_titles,ad_delivery_start_time,ad_snapshot_url,page_name",
+    limit: "25",
+  });
+
+  try {
+    const r = await fetch("https://graph.facebook.com/v19.0/ads_archive?" + params.toString());
+    if (!r.ok) {
+      console.log(`Meta Ad Library error: ${r.status}`);
+      return null;
+    }
+    const data = await r.json();
+    const ads = (data.data || []).map(ad => ({
+      title: (ad.ad_creative_link_titles || [])[0] || (ad.ad_creative_bodies || [])[0]?.slice(0, 80) || "Untitled",
+      body: (ad.ad_creative_bodies || [])[0]?.slice(0, 120) || "",
+      startDate: ad.ad_delivery_start_time || null,
+      snapshotUrl: ad.ad_snapshot_url || null,
+      pageName: ad.page_name || searchName,
+    }));
+
+    // Count ads started in last 7 days
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const newThisWeek = ads.filter(a => a.startDate && new Date(a.startDate).getTime() > weekAgo).length;
+
+    const result = { totalActive: ads.length, newThisWeek, ads: ads.slice(0, 5), pageName: ads[0]?.pageName || searchName };
+
+    // Cache for 6 hours
+    await env.STATE.put(cacheKey, JSON.stringify(result), { expirationTtl: 21600 });
+    return result;
+  } catch (e) {
+    console.log(`Meta Ad Library error: ${e.message}`);
+    return null;
+  }
+}
+
+function formatAdsBlocks(domain, companyName, metaData) {
+  const name = metaData?.pageName || companyName || domain.split(".")[0].charAt(0).toUpperCase() + domain.split(".")[0].slice(1);
+  const now = new Date().toLocaleDateString("en-US", { day: "numeric", month: "short", year: "numeric" });
+  const blocks = [];
+
+  // Header
+  blocks.push({ type: "header", text: { type: "plain_text", text: `🔎 Ads Report: ${name}`, emoji: true } });
+
+  // Meta section
+  if (metaData) {
+    let metaText = `*📘 Meta (Facebook/Instagram)* — ${metaData.totalActive} active ad${metaData.totalActive !== 1 ? "s" : ""}`;
+    if (metaData.newThisWeek > 0) metaText += ` (${metaData.newThisWeek} new this week)`;
+    metaText += "\n";
+    for (const ad of metaData.ads.slice(0, 3)) {
+      const date = ad.startDate ? new Date(ad.startDate).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "";
+      metaText += `• "${ad.title}"${date ? ` (${date})` : ""}\n`;
+    }
+    if (metaData.totalActive > 3) metaText += `_...and ${metaData.totalActive - 3} more_`;
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: metaText },
+      accessory: {
+        type: "button",
+        text: { type: "plain_text", text: "View All", emoji: true },
+        url: `https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL&q=${encodeURIComponent(name)}`,
+      },
+    });
+  } else {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: "*📘 Meta* — Search the Ad Library" },
+      accessory: {
+        type: "button",
+        text: { type: "plain_text", text: "Search", emoji: true },
+        url: `https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=ALL&q=${encodeURIComponent(name)}`,
+      },
+    });
+  }
+
+  // Google section
+  blocks.push({
+    type: "section",
+    text: { type: "mrkdwn", text: "*🔍 Google Ads* — Check transparency center" },
+    accessory: {
+      type: "button",
+      text: { type: "plain_text", text: "View", emoji: true },
+      url: `https://adstransparency.google.com/?domain=${encodeURIComponent(domain)}`,
+    },
+  });
+
+  // LinkedIn section
+  blocks.push({
+    type: "section",
+    text: { type: "mrkdwn", text: "*💼 LinkedIn* — Search ad library" },
+    accessory: {
+      type: "button",
+      text: { type: "plain_text", text: "View", emoji: true },
+      url: `https://www.linkedin.com/ad-library/search?companyName=${encodeURIComponent(name)}`,
+    },
+  });
+
+  // Footer
+  blocks.push({
+    type: "context",
+    elements: [{ type: "mrkdwn", text: `Last checked: ${now} • ${metaData ? "Data cached for 6h" : "Set META_APP_TOKEN for live Meta data"}` }],
+  });
+
+  return blocks;
 }
 
 // ─── STATE MIGRATION (v1 → v2) ──────────────────────────────────────────────
@@ -737,6 +961,9 @@ async function runMonitor(env, configOverride, userId) {
     if (low.length > 0) await sendSlack(slackUrl, low.map((a) => a.text).join("\n\n---\n\n"));
   } else {
     console.log("\nNo changes detected.");
+    const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    const totalPages = competitors.reduce((n, c) => n + (c.pages?.length || 0) + (c.blogRss ? 1 : 0), 0);
+    await sendSlack(slackUrl, `🐺 *ScopeHound Daily Report* — ${date}\n\nScanned ${competitors.length} competitor(s) across ${totalPages} page(s) — no changes detected. All quiet on the competitive front.`);
   }
 
   console.log("Done!");
@@ -1560,7 +1787,7 @@ function esc(s){return(s||"").replace(/"/g,"&quot;").replace(/</g,"&lt;")}
 
 function autoFill(i,url){
   if(!url)return;
-  const u=url.replace(/\\/+$/,"");
+  const u=url.replace(/\/+$/,"");
   if(!comps[i].pricingUrl){comps[i].pricingUrl=u+"/pricing";const el=$("pricing"+i);if(el)el.value=comps[i].pricingUrl;}
 }
 
@@ -1598,7 +1825,7 @@ function renderSummary(){
 function buildCompetitors(){
   return comps.filter(c=>c.name&&c.website).map(c=>{
     const pages=[];
-    const site=c.website.replace(/\\/+$/,"");
+    const site=c.website.replace(/\/+$/,"");
     if(c.pricingUrl)pages.push({id:"pricing",url:c.pricingUrl,type:"pricing",label:"Pricing"});
     pages.push({id:"home",url:site,type:"general",label:"Homepage"});
     return{name:c.name,website:site,blogRss:c.blogRss||null,pages};
@@ -1737,6 +1964,11 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 </head>
 <body>
 <header><h1>Scope<span>Hound</span></h1><a href="/dashboard">Dashboard</a></header>
+<div id="activatingOverlay" style="display:none;position:fixed;inset:0;background:#0a0c0e;z-index:9999;align-items:center;justify-content:center;flex-direction:column">
+<div style="font-size:24px;font-weight:700;color:#d4d8de;margin-bottom:12px">Activating your subscription<span id="loadDots"></span></div>
+<div style="font-size:14px;color:#6b7280;margin-bottom:24px" id="activatingStatus">Confirming payment with Stripe...</div>
+<div style="width:200px;height:4px;background:#1e2328;border-radius:2px;overflow:hidden"><div id="activatingBar" style="width:0%;height:100%;background:#5c6b3c;border-radius:2px;transition:width 0.5s ease"></div></div>
+</div>
 <div class="wrap">
 <div id="successMsg"></div>
 <div class="current" id="currentPlan"><div><div class="current-plan" id="planName">Loading...</div><div class="current-status" id="planStatus"></div></div></div>
@@ -1766,13 +1998,25 @@ async function loadProfile(){
   if(new URLSearchParams(location.search).get("success")){waitForSubscription();return;}
 }
 async function waitForSubscription(){
-  document.getElementById("planStatus").textContent="Activating your subscription...";
+  const overlay=document.getElementById("activatingOverlay");
+  overlay.style.display="flex";
+  const bar=document.getElementById("activatingBar");
+  const status=document.getElementById("activatingStatus");
+  const dots=document.getElementById("loadDots");
+  let dotCount=0;
+  const dotInterval=setInterval(()=>{dotCount=(dotCount+1)%4;dots.textContent=".".repeat(dotCount);},400);
+  const steps=["Confirming payment with Stripe...","Setting up your account...","Almost ready..."];
   for(let i=0;i<20;i++){
+    bar.style.width=Math.min(5+i*4.5,95)+"%";
+    if(i<steps.length)status.textContent=steps[i];
+    else if(i>=6)status.textContent="Still working, hang tight...";
     await new Promise(r=>setTimeout(r,1500));
     try{const r=await fetch("/api/user/profile");if(!r.ok)continue;const u=await r.json();
-    if(u.subscriptionStatus==="active"){window.location.href="/setup";return;}}catch(e){}
+    if(u.subscriptionStatus==="active"){bar.style.width="100%";status.textContent="You're all set!";clearInterval(dotInterval);dots.textContent="";await new Promise(r=>setTimeout(r,600));window.location.href="/setup";return;}}catch(e){}
   }
-  document.getElementById("planStatus").textContent="Subscription is processing. Please refresh in a moment.";
+  clearInterval(dotInterval);dots.textContent="";
+  bar.style.width="100%";bar.style.background="#c44";
+  status.textContent="Taking longer than expected. Please refresh the page.";
 }
 async function checkout(tier){try{const r=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
 async function manageSubscription(){try{const r=await fetch("/api/billing/portal",{method:"POST"});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
@@ -1888,7 +2132,7 @@ input:focus{outline:none;border-color:#5c6b3c}
 </div>
 <div id="slackNotConnected">
 <div style="margin:24px 0;text-align:center">
-<a href="#" onclick="window.open('/auth/slack','slackauth','width=600,height=700,left='+((screen.width-600)/2)+',top='+((screen.height-700)/2));return false" class="btn btn-primary" style="display:inline-flex;align-items:center;gap:10px;padding:14px 28px;font-size:14px">
+<a href="/auth/slack" class="btn btn-primary" style="display:inline-flex;align-items:center;gap:10px;padding:14px 28px;font-size:14px">
 <svg width="20" height="20" viewBox="0 0 123 123" fill="none"><path d="M25.8 77.6a12.9 12.9 0 1 1-12.9-12.9h12.9v12.9zm6.5 0a12.9 12.9 0 1 1 25.8 0v32.3a12.9 12.9 0 1 1-25.8 0V77.6z" fill="#E01E5A"/><path d="M45.2 25.8a12.9 12.9 0 1 1 12.9-12.9v12.9H45.2zm0 6.5a12.9 12.9 0 1 1 0 25.8H12.9a12.9 12.9 0 0 1 0-25.8h32.3z" fill="#36C5F0"/><path d="M97.2 45.2a12.9 12.9 0 1 1 12.9 12.9H97.2V45.2zm-6.5 0a12.9 12.9 0 1 1-25.8 0V12.9a12.9 12.9 0 1 1 25.8 0v32.3z" fill="#2EB67D"/><path d="M77.8 97.2a12.9 12.9 0 1 1-12.9 12.9V97.2h12.9zm0-6.5a12.9 12.9 0 1 1 0-25.8h32.3a12.9 12.9 0 0 1 0 25.8H77.8z" fill="#ECB22E"/></svg>
 Add to Slack
 </a>
@@ -1905,7 +2149,7 @@ Add to Slack
 <div></div>
 <div style="display:flex;gap:8px;align-items:center">
 <a href="#" onclick="skipSlack();return false" style="font-size:12px;color:#6b7280" id="skipLink">Skip for now</a>
-<button class="btn btn-primary" id="slackNext" onclick="goStep(2)" disabled>Next</button>
+<button class="btn btn-primary" id="slackNext" onclick="goStep(2)">Next</button>
 </div>
 </div>
 </div>
@@ -1921,6 +2165,14 @@ Add to Slack
 <input type="url" id="myCompanyUrl" placeholder="yourcompany.com">
 <button class="btn btn-primary btn-sm" onclick="findCompetitors()">Find Competitors</button>
 </div>
+<details style="margin-top:12px;cursor:pointer">
+<summary style="font-size:13px;color:#7a8c52;font-weight:600">Know your competitors? Add them for better results</summary>
+<p style="font-size:12px;color:#6b7280;margin:8px 0 6px">Providing 1-2 known competitors helps our AI find more relevant matches in your niche.</p>
+<div style="display:flex;gap:8px;margin-bottom:8px">
+<input type="url" id="seedComp1" placeholder="competitor1.com" style="flex:1;padding:8px 12px;border:1px solid #374151;border-radius:8px;background:#1a1a2e;color:#e5e7eb;font-size:13px">
+<input type="url" id="seedComp2" placeholder="competitor2.com" style="flex:1;padding:8px 12px;border:1px solid #374151;border-radius:8px;background:#1a1a2e;color:#e5e7eb;font-size:13px">
+</div>
+</details>
 <div id="aiResults"></div>
 </div>
 <div class="ai-or">or add manually</div>
@@ -1959,6 +2211,8 @@ async function loadUserInfo(){
     document.getElementById("slackNotConnected").style.display="none";
     document.getElementById("slackNext").disabled=false;
     document.getElementById("skipLink").style.display="none";
+    document.getElementById("slackStatus").textContent="Connected to Slack!";
+    setTimeout(function(){goStep(2);},100);
   }
   // Load existing config (Slack + competitors)
   try{const r=await fetch("/api/config");if(r.ok){const c=await r.json();
@@ -1979,16 +2233,6 @@ async function loadUserInfo(){
   if(slackVerified)goStep(2);
   }}catch(e){}
 }
-window.addEventListener("message",function(e){
-  if(e.data&&e.data.type==="slack-connected"){
-    slackVerified=true;
-    document.getElementById("slackConnected").style.display="block";
-    document.getElementById("slackNotConnected").style.display="none";
-    document.getElementById("slackNext").disabled=false;
-    document.getElementById("skipLink").style.display="none";
-    document.getElementById("slackStatus").textContent="Connected to Slack"+(e.data.channel?" (#"+e.data.channel+")":"")+"!";
-  }
-});
 function goStep(n){
   if(n===2&&!slackVerified&&!slackSkipped){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Connect Slack or click Skip for now.</div>';return;}
   if(n===3&&competitors.length===0){alert("Add at least one competitor.");return;}
@@ -2018,32 +2262,41 @@ async function findCompetitors(){
   const el=document.getElementById("aiResults");
   let u=document.getElementById("myCompanyUrl").value.trim();
   if(!u){el.innerHTML='<div class="msg msg-err">Enter your company URL.</div>';return;}
-  if(!/^https?:\/\//i.test(u))u="https://"+u;
+  if(!u.match(/^https?:/i))u="https://"+u;
   document.getElementById("myCompanyUrl").value=u;
   el.innerHTML='<div class="ai-thinking"><div class="ai-brain">Analyzing your website...</div><div class="ai-bar"></div><div class="ai-status">Identifying industry and finding competitors</div></div>';
   // Animate status text
-  const statuses=["Reading your homepage...","Identifying your industry...","Finding competitors in your space...","Ranking by relevance..."];
+  const seeds=[(document.getElementById("seedComp1")||{}).value,(document.getElementById("seedComp2")||{}).value].filter(s=>s&&s.trim());
+  const statuses=seeds.length>0?["Reading your homepage...","Analyzing your known competitors...","Searching for similar companies...","Cross-referencing alternatives...","Ranking by relevance..."]:["Reading your homepage...","Identifying your industry...","Finding competitors in your space...","Ranking by relevance..."];
   let si=0;
   const statusInterval=setInterval(()=>{
     si=(si+1)%statuses.length;
     const s=el.querySelector(".ai-status");if(s)s.textContent=statuses[si];
   },2000);
   try{
-    const r=await fetch("/api/config/discover-competitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u})});
+    const seeds=[(document.getElementById("seedComp1")||{}).value,(document.getElementById("seedComp2")||{}).value].map(s=>(s||"").trim()).filter(Boolean);
+    const r=await fetch("/api/config/discover-competitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u,seeds:seeds})});
     clearInterval(statusInterval);
     const d=await r.json();
     if(d.error){el.innerHTML='<div class="msg msg-err">'+d.error+'</div>';return;}
     aiSuggestions=d.competitors||[];
     if(aiSuggestions.length===0){el.innerHTML='<div class="msg">No competitors found. Try adding them manually below.</div>';return;}
     let html='<div style="font-size:12px;color:#6b7280;margin:12px 0 8px">Industry: <strong style="color:#7a8c52">'+((d.industry||"").charAt(0).toUpperCase()+(d.industry||"").slice(1))+'</strong> — Select competitors to add:</div>';
-    html+=aiSuggestions.map((c,i)=>'<div class="ai-result" onclick="toggleAiResult(this,'+i+')"><input type="checkbox" id="aicheck'+i+'"><div><div class="ai-name">'+c.name+'</div><div class="ai-url">'+c.url+'</div><div class="ai-reason">'+c.reason+'</div></div></div>').join("");
+    html+=aiSuggestions.map((c,i)=>'<div class="ai-result" onclick="toggleAiResult(event,this,'+i+')"><input type="checkbox" id="aicheck'+i+'" onchange="onAiCheck('+i+')"><div><div class="ai-name">'+c.name+'</div><div class="ai-url">'+c.url+'</div><div class="ai-reason">'+c.reason+'</div></div></div>').join("");
     html+='<button class="btn btn-primary btn-sm" onclick="addSelectedAi()" style="margin-top:12px" id="addAiBtn" disabled>Add Selected Competitors</button>';
     el.innerHTML=html;
   }catch(e){clearInterval(statusInterval);el.innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
 }
-function toggleAiResult(el,idx){
-  el.classList.toggle("selected");
+function toggleAiResult(ev,el,idx){
+  if(ev.target.tagName==="INPUT")return;
   const cb=document.getElementById("aicheck"+idx);cb.checked=!cb.checked;
+  el.classList.toggle("selected",cb.checked);
+  const any=aiSuggestions.some((_,i)=>document.getElementById("aicheck"+i)?.checked);
+  document.getElementById("addAiBtn").disabled=!any;
+}
+function onAiCheck(idx){
+  const cb=document.getElementById("aicheck"+idx);
+  cb.closest(".ai-result").classList.toggle("selected",cb.checked);
   const any=aiSuggestions.some((_,i)=>document.getElementById("aicheck"+i)?.checked);
   document.getElementById("addAiBtn").disabled=!any;
 }
@@ -2117,7 +2370,7 @@ function togglePage(ci,pi,on){
 }
 function normalizeUrl(u){
   u=u.trim();if(!u)return u;
-  if(!/^https?:\/\//i.test(u))u="https://"+u;
+  if(!u.match(/^https?:/i))u="https://"+u;
   return u;
 }
 async function scanSite(idx){
@@ -2139,12 +2392,12 @@ async function scanSite(idx){
 function detectPageType(u){
   try{const p=new URL(u).pathname.toLowerCase();}catch(e){return{type:"general",label:"Custom"};}
   const p=new URL(u).pathname.toLowerCase();
-  if(/\\/(pricing|plans|price|plans-pricing)/.test(p))return{type:"pricing",label:"Pricing"};
-  if(/\\/(blog|news|updates|changelog|articles)/.test(p))return{type:"blog",label:"Blog"};
-  if(/\\/(careers|jobs|hiring|join)/.test(p))return{type:"careers",label:"Careers"};
-  if(/\\/(features|product|solutions)/.test(p))return{type:"general",label:"Features"};
-  if(/\\/(about|company|team)/.test(p))return{type:"general",label:"About"};
-  if(/\\/(docs|documentation|support|help)/.test(p))return{type:"general",label:"Docs"};
+  if(/(pricing|plans|price|plans-pricing)/.test(p))return{type:"pricing",label:"Pricing"};
+  if(/(blog|news|updates|changelog|articles)/.test(p))return{type:"blog",label:"Blog"};
+  if(/(careers|jobs|hiring|join)/.test(p))return{type:"careers",label:"Careers"};
+  if(/(features|product|solutions)/.test(p))return{type:"general",label:"Features"};
+  if(/(about|company|team)/.test(p))return{type:"general",label:"About"};
+  if(/(docs|documentation|support|help)/.test(p))return{type:"general",label:"Docs"};
   return{type:"general",label:"Custom"};
 }
 function addCustomPage(idx){
@@ -2159,10 +2412,11 @@ function addCustomPage(idx){
   document.getElementById("pages"+idx).innerHTML=renderPageCheckboxes(idx);
 }
 function renderReview(){
-  const totalPages=competitors.reduce((s,c)=>s+c.pages.length,0);
+  const ready=competitors.filter(c=>c.name&&c.website);
+  const totalPages=ready.reduce((s,c)=>s+c.pages.length,0);
   document.getElementById("reviewSummary").innerHTML=
     '<div class="review-item"><span class="review-label">Slack</span><span>Connected</span></div>'
-    +'<div class="review-item"><span class="review-label">Competitors</span><span>'+competitors.length+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Competitors</span><span>'+ready.length+'</span></div>'
     +'<div class="review-item"><span class="review-label">Pages monitored</span><span>'+totalPages+'</span></div>'
     +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"recon").charAt(0).toUpperCase()+(window._tier||"recon").slice(1)+'</span></div>'
     +'<div class="review-item"><span class="review-label">Schedule</span><span>Daily at 9am UTC</span></div>';
@@ -2189,11 +2443,14 @@ async function launch(){
   msgEl.innerHTML=scanProgress(steps);
   setScanStep(0,"active");
   try{
-    const comps=competitors.map(c=>({name:c.name,website:c.website,blogRss:c.blogRss||null,pages:c.pages.map(p=>({id:p.id,url:p.url,type:p.type,label:p.label}))}));
+    const comps=competitors.filter(c=>c.name&&c.website).map(c=>({name:c.name,website:c.website,blogRss:c.blogRss||null,pages:c.pages.map(p=>({id:p.id,url:p.url,type:p.type,label:p.label}))}));
+    if(comps.length===0){throw new Error("Add at least one competitor with a name and URL");}
     let r=await fetch("/api/config/competitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({competitors:comps})});
     let d=await r.json();if(!r.ok){throw new Error(d.error||"Failed to save competitors");}
     setScanStep(0,"done");setScanStep(1,"active");
-    r=await fetch("/api/config/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slackWebhookUrl:document.getElementById("slackUrl").value.trim()})});
+    const slackUrlVal=document.getElementById("slackUrl").value.trim();
+    const settingsPayload=slackUrlVal?{slackWebhookUrl:slackUrlVal}:{};
+    r=await fetch("/api/config/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settingsPayload)});
     d=await r.json();if(!r.ok){throw new Error(d.error||"Failed to save settings");}
     setScanStep(1,"done");setScanStep(2,"active");
     btn.textContent="Scanning...";
@@ -2373,6 +2630,31 @@ export default {
       });
     }
 
+    // ── Bot / vulnerability scanner blocker ──
+    const lp = path.toLowerCase();
+    // Block requests with suspicious file extensions (PHP, ASP, JSP, CGI, env files, etc.)
+    if (/\.(php|asp|aspx|jsp|cgi|env|ini|bak|sql|xml|yml|yaml|log|gz|zip|tar|rar|7z|exe|dll|sh|bat|cmd|ps1|config|htaccess|htpasswd|git|svn|DS_Store)$/i.test(lp)) {
+      return new Response("Not Found", { status: 404, headers: { "Cache-Control": "public, max-age=86400" } });
+    }
+    // Block common vulnerability scanner paths
+    if (/^\/(wp-|wordpress|admin|cgi-bin|phpmyadmin|mysql|cpanel|webmail|autodiscover|remote|telescope|debug|actuator|console|manager|jmx|\.well-known\/security|vendor\/phpunit|_profiler|elmah|trace\.axd|owa\/|ecp\/|exchange|aspnet)/i.test(lp)) {
+      return new Response("Not Found", { status: 404, headers: { "Cache-Control": "public, max-age=86400" } });
+    }
+    // Block single-segment company-name slug probing (e.g. /moonpay, /lenovo)
+    // Valid ScopeHound paths all match known prefixes
+    const validPrefixes = ["/", "/signin", "/auth/", "/api/", "/setup", "/dashboard", "/billing", "/partner/", "/privacy", "/support", "/test", "/state", "/history", "/reset", "/run", "/robots.txt"];
+    if (path !== "/" && !validPrefixes.some(p => p === "/" ? false : lp.startsWith(p.toLowerCase()))) {
+      return new Response("Not Found", { status: 404, headers: { "Cache-Control": "public, max-age=86400" } });
+    }
+
+    // ── robots.txt ──
+    if (path === "/robots.txt") {
+      return new Response(
+        `User-agent: *\nAllow: /signin\nAllow: /privacy\nAllow: /support\nAllow: /partner/apply\nDisallow: /dashboard\nDisallow: /setup\nDisallow: /billing\nDisallow: /api/\nDisallow: /auth/\nDisallow: /test\nDisallow: /state\nDisallow: /history\nDisallow: /reset\n\nSitemap: https://scopehound.app/sitemap.xml`,
+        { headers: { "Content-Type": "text/plain", "Cache-Control": "public, max-age=86400" } }
+      );
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // HOSTED MODE ROUTES — only active when Google/Stripe/JWT secrets are set
     // ══════════════════════════════════════════════════════════════════════════
@@ -2507,12 +2789,8 @@ export default {
           }
           // Send test message
           await sendSlack(tokenData.incoming_webhook.url, "ScopeHound is connected to #" + (tokenData.incoming_webhook.channel || "your channel") + ". You're all set!");
-          // If opened in popup, notify parent and close; otherwise redirect
-          const popupHTML = `<!DOCTYPE html><html><body><script>
-            if(window.opener){window.opener.postMessage({type:"slack-connected",channel:"${(tokenData.incoming_webhook.channel||"").replace(/"/g,"")}"},"*");window.close();}
-            else{location.href="/setup?slack=connected";}
-          </script><p>Connected! You can close this window.</p></body></html>`;
-          return new Response(popupHTML, { headers: { "Content-Type": "text/html" } });
+          // Redirect back to setup
+          return Response.redirect(url.origin + "/setup?slack=connected", 302);
         } catch (e) {
           return new Response("Slack auth error: " + e.message, { status: 500 });
         }
@@ -2533,6 +2811,7 @@ export default {
         if (expected !== slackSig) return new Response("Invalid signature", { status: 401 });
 
         const params = new URLSearchParams(rawBody);
+        const command = (params.get("command") || "").trim();
         const text = (params.get("text") || "").trim();
         const teamId = params.get("team_id");
         const responseUrl = params.get("response_url");
@@ -2546,8 +2825,50 @@ export default {
         if (!userRaw) return jsonResponse({ response_type: "ephemeral", text: "Account not found." });
         const user = JSON.parse(userRaw);
 
+        // ── /ads command ──
+        if (command === "/ads") {
+          if (user.tier !== "commander" && user.tier !== "strategic") {
+            return jsonResponse({ response_type: "ephemeral", text: "The `/ads` command is available on Commander and Strategic plans. Upgrade at worker.scopehound.app/billing" });
+          }
+          if (!text) return jsonResponse({ response_type: "ephemeral", text: "Usage: `/ads <domain>` — e.g. `/ads acme.com`" });
+          let domain = text.replace(/^https?:\/\//i, "").replace(/^www\./, "").replace(/\/.*$/, "").toLowerCase();
+          if (!domain.includes(".")) return jsonResponse({ response_type: "ephemeral", text: "Please provide a valid domain, e.g. `/ads acme.com`" });
+
+          // Look up competitor name from user's config
+          const prefix = "user_config:" + userId + ":";
+          const compsRaw = await env.STATE.get(prefix + "competitors");
+          const comps = compsRaw ? JSON.parse(compsRaw) : [];
+          const match = comps.find(c => {
+            try { return new URL(c.website).hostname.replace(/^www\./, "") === domain; } catch { return false; }
+          });
+          const companyName = match ? match.name : domain.split(".")[0].charAt(0).toUpperCase() + domain.split(".")[0].slice(1);
+
+          // Respond immediately, then fetch ad data in background
+          const immediate = jsonResponse({ response_type: "ephemeral", text: `🔎 Looking up ads for ${domain}...` });
+
+          ctx.waitUntil((async () => {
+            try {
+              const metaData = await fetchMetaAds(domain, companyName, env.META_APP_TOKEN, env);
+              const blocks = formatAdsBlocks(domain, companyName, metaData);
+              await fetch(responseUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ response_type: "ephemeral", blocks }),
+              });
+            } catch (e) {
+              await fetch(responseUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ response_type: "ephemeral", text: "Error fetching ads: " + e.message }),
+              });
+            }
+          })());
+          return immediate;
+        }
+
+        // ── /scopehound commands ──
         if (!text || text === "help") {
-          return jsonResponse({ response_type: "ephemeral", text: "*ScopeHound Commands*\n`/scopehound add <url>` — Add a competitor\n`/scopehound list` — List your competitors\n`/scopehound remove <name>` — Remove a competitor\n`/scopehound scan` — Trigger a manual scan" });
+          return jsonResponse({ response_type: "ephemeral", text: "*ScopeHound Commands*\n`/scopehound add <url>` — Add a competitor\n`/scopehound list` — List your competitors\n`/scopehound remove <name>` — Remove a competitor\n`/scopehound scan` — Trigger a manual scan\n`/ads <domain>` — Look up competitor ads" });
         }
 
         const prefix = "user_config:" + userId + ":";
@@ -2822,14 +3143,17 @@ export default {
       if (response) return response;
       try {
         const body = await request.json();
-        const settings = {
-          slackWebhookUrl: body.slackWebhookUrl || null,
-          productHuntToken: body.productHuntToken || null,
-          productHuntTopics: body.productHuntTopics || [],
-          announcementKeywords: body.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS,
-          phMinVotes: body.phMinVotes ?? 0,
-        };
         const prefix = isHostedMode(env) ? `user_config:${user.id}:` : "config:";
+        const existingRaw = await env.STATE.get(prefix + "settings");
+        const existing = existingRaw ? JSON.parse(existingRaw) : {};
+        const settings = {
+          ...existing,
+          slackWebhookUrl: body.slackWebhookUrl !== undefined ? (body.slackWebhookUrl || null) : (existing.slackWebhookUrl || null),
+          productHuntToken: body.productHuntToken !== undefined ? (body.productHuntToken || null) : (existing.productHuntToken || null),
+          productHuntTopics: body.productHuntTopics !== undefined ? body.productHuntTopics : (existing.productHuntTopics || []),
+          announcementKeywords: body.announcementKeywords !== undefined ? body.announcementKeywords : (existing.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS),
+          phMinVotes: body.phMinVotes !== undefined ? body.phMinVotes : (existing.phMinVotes ?? 0),
+        };
         await env.STATE.put(prefix + "settings", JSON.stringify(settings));
         return jsonResponse({ success: true });
       } catch (e) {
@@ -2885,7 +3209,8 @@ export default {
         if (!body.url) return jsonResponse({ error: "url required" }, 400);
         let compUrl = body.url.trim();
         if (!/^https?:\/\//i.test(compUrl)) compUrl = "https://" + compUrl;
-        const result = await discoverCompetitors(env.AI, compUrl);
+        const seeds = Array.isArray(body.seeds) ? body.seeds.map(s => s.trim()).filter(Boolean) : [];
+        const result = await discoverCompetitors(env.AI, compUrl, seeds);
         return jsonResponse(result);
       } catch (e) {
         return jsonResponse({ error: e.message }, 400);
@@ -3120,19 +3445,7 @@ p{font-size:14px;color:#b0b5bd;margin-bottom:12px}
     }
 
     return new Response(
-      `ScopeHound v3 — AI Competitive Intelligence Agent
-
-Endpoints:
-  /dashboard       — Web dashboard
-  /setup           — Configuration wizard
-  /test            — Run monitor manually
-  /state           — View current state
-  /history         — View change history
-  /test-slack      — Send test message to Slack
-  /reset           — Reset all state and re-index
-  /reset-pricing   — Reset pricing data only
-
-Monitoring ${config.competitors.length} competitors across ${config.competitors.reduce((n, c) => n + (c.pages?.length || 0), 0)} pages.`,
+      `ScopeHound v3\n\nMonitoring ${config.competitors.length} competitor(s). Visit /dashboard to get started.`,
       { headers: { "Content-Type": "text/plain" } },
     );
   },

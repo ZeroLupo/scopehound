@@ -13,6 +13,11 @@ features:
       description: Manage your competitive intelligence
       usage_hint: "[add <url> | list | remove <name> | scan | help]"
       should_escape: false
+    - command: /ads
+      url: https://worker.scopehound.app/api/slack/commands
+      description: Look up a competitor's active ads
+      usage_hint: "<domain>"
+      should_escape: false
 oauth_config:
   redirect_urls:
     - https://worker.scopehound.app/auth/slack/callback
