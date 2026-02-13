@@ -2,9 +2,9 @@ name = "scopehoundv3-worker"
 main = "src/index.js"
 compatibility_date = "2026-02-12"
 
-# Cron trigger - runs daily at 9am UTC
+# Cron trigger - runs every 6 hours (Scout: manual only, Operator: 9am+9pm, Command: all 4)
 [triggers]
-crons = ["0 9 * * *"]
+crons = ["0 3,9,15,21 * * *"]
 
 # KV namespace for storing state
 [[kv_namespaces]]
@@ -44,7 +44,10 @@ invocation_logs = true
 #
 # HOSTED MODE (optional):
 #   STRIPE_PRICE_IDS     - JSON mapping tier names to Stripe Price IDs
-#                          e.g. {"recon":"price_xxx","operator":"price_yyy","commander":"price_zzz","strategic":"price_zzz"}
+#                          e.g. {"scout_monthly":"price_xxx","scout_annual":"price_xxx","operator_monthly":"price_yyy","operator_annual":"price_yyy","command_monthly":"price_zzz","command_annual":"price_zzz"}
+#
+# AI (optional, enables AI-powered analysis — falls back to heuristics without it):
+#   ANTHROPIC_API_KEY    - Anthropic API key (sk-ant-...) for Claude-powered analysis
 #
 # SLACK OAUTH (optional, enables "Add to Slack" button + slash commands):
 #   SLACK_CLIENT_ID      - Slack app client ID

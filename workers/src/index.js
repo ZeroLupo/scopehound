@@ -23,14 +23,29 @@ const DEFAULT_ANNOUNCEMENT_KEYWORDS = {
 // ─── TIER DEFINITIONS ────────────────────────────────────────────────────────
 
 const TIERS = {
-  recon:     { name: "Recon",     price: 19.99, competitors: 3,  pages: 6,   scansPerDay: 1, historyDays: 30 },
-  operator:  { name: "Operator",  price: 49,  competitors: 15, pages: 60,  scansPerDay: 1, historyDays: 90 },
-  commander: { name: "Commander", price: 99,  competitors: 25, pages: 100, scansPerDay: 2, historyDays: 365 },
-  strategic: { name: "Strategic", price: 199, competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
+  scout:    { name: "Scout",    competitors: 3,  pages: 6,   scansPerDay: 0, historyDays: 30 },
+  operator: { name: "Operator", competitors: 15, pages: 60,  scansPerDay: 2, historyDays: 365 },
+  command:  { name: "Command",  competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
+};
+
+const FEATURE_GATES = {
+  ai_discovery:       ["operator", "command"],
+  seed_discovery:     ["operator", "command"],
+  slash_scan:         ["operator", "command"],
+  slash_ads:          ["operator", "command"],
+  rss_monitoring:     ["operator", "command"],
+  scheduled_scans:    ["operator", "command"],
+  competitor_radar:   ["command"],
+  priority_scan_queue: ["command"],
 };
 
 function getTierLimits(tier) {
-  return TIERS[tier] || TIERS.recon;
+  return TIERS[tier] || TIERS.scout;
+}
+
+function hasFeature(tier, feature) {
+  const allowed = FEATURE_GATES[feature];
+  return allowed ? allowed.includes(tier) : false;
 }
 
 // ─── CONFIG LOADER ───────────────────────────────────────────────────────────
@@ -204,34 +219,55 @@ function computeTextDiff(oldText, newText) {
 
 // ─── AI FUNCTIONS ────────────────────────────────────────────────────────────
 
-async function extractPricingWithLLM(html, ai) {
-  if (!ai || !canSubrequest()) return null;
+// Claude API helper — works in Workers without any SDK
+async function callClaude(env, prompt, { model = "claude-haiku-4-5-20251001", maxTokens = 1000, system } = {}) {
+  const apiKey = env.ANTHROPIC_API_KEY;
+  if (!apiKey || !canSubrequest()) return null;
+  trackSubrequest();
+  const body = {
+    model,
+    max_tokens: maxTokens,
+    messages: [{ role: "user", content: prompt }],
+  };
+  if (system) body.system = system;
+  const response = await withTimeout(fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  }), 30000);
+  if (!response.ok) {
+    console.log(`[Claude API] ${response.status}: ${await response.text().catch(() => "")}`);
+    return null;
+  }
+  const data = await response.json();
+  const text = data.content?.[0]?.text;
+  if (!text) return null;
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  return jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+}
+
+async function extractPricingWithLLM(html, env) {
+  if (!env.ANTHROPIC_API_KEY || !canSubrequest()) return null;
   const text = htmlToText(html);
-  const prompt = `Extract all pricing information from this webpage text. Return a JSON object with this structure:
+  try {
+    return await callClaude(env, `Extract all pricing information from this webpage text. Return a JSON object with this structure:
 {"plans":[{"name":"Plan Name","price":"$X/mo or $X/year or Custom or Free","features":["key feature 1","key feature 2"]}],"notes":"Any important pricing notes like discounts, trials, etc."}
 If no pricing is found, return {"plans":[],"notes":"No pricing found"}.
 Only return valid JSON, no other text.
 Webpage text:
-${text}`;
-  try {
-    trackSubrequest();
-    const response = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
-      messages: [{ role: "user", content: prompt }],
-      max_tokens: 1000,
-    }), 15000);
-    const content = response.response;
-    if (!content) return null;
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
-    return null;
+${text}`);
   } catch (error) {
     console.log(`  AI pricing error: ${error.message}`);
     return null;
   }
 }
 
-async function analyzePageChange(ai, competitorName, pageLabel, pageType, diff) {
-  if (!ai || !canSubrequest()) return null;
+async function analyzePageChange(env, competitorName, pageLabel, pageType, diff) {
+  if (!env.ANTHROPIC_API_KEY || !canSubrequest()) return null;
   if (diff.changeRatio > 0.8) {
     return {
       summary: "Page significantly redesigned",
@@ -240,7 +276,8 @@ async function analyzePageChange(ai, competitorName, pageLabel, pageType, diff) 
       recommendation: "Review the page manually to assess the changes.",
     };
   }
-  const prompt = `You are a competitive intelligence analyst. A competitor's web page has changed.
+  try {
+    return await callClaude(env, `You are a competitive intelligence analyst. A competitor's web page has changed.
 Competitor: ${competitorName}
 Page: ${pageLabel}
 REMOVED content: ${diff.beforeExcerpt || "(none)"}
@@ -248,43 +285,23 @@ ADDED content: ${diff.afterExcerpt || "(none)"}
 Respond with ONLY valid JSON:
 {"summary":"One sentence: what specifically changed","analysis":"2-3 sentences: why this matters competitively","priority":"high or medium or low","recommendation":"One sentence: what action to take"}
 Priority guide: high = pricing/product changes, major positioning shifts. medium = feature updates, messaging changes. low = minor copy edits.
-Return ONLY the JSON object.`;
-  try {
-    trackSubrequest();
-    const response = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
-      messages: [{ role: "user", content: prompt }],
-      max_tokens: 500,
-    }), 15000);
-    const content = response.response;
-    if (!content) return null;
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
-    return null;
+Return ONLY the JSON object.`, { maxTokens: 500 });
   } catch (error) {
     console.log(`  AI analysis error: ${error.message}`);
     return null;
   }
 }
 
-async function classifyAnnouncement(ai, competitorName, postTitle, matchedCategory) {
-  if (!ai || !canSubrequest()) return { category: matchedCategory, priority: "medium", summary: postTitle };
-  const prompt = `Classify this blog post from competitor "${competitorName}".
+async function classifyAnnouncement(env, competitorName, postTitle, matchedCategory) {
+  if (!env.ANTHROPIC_API_KEY || !canSubrequest()) return { category: matchedCategory, priority: "medium", summary: postTitle };
+  try {
+    const result = await callClaude(env, `Classify this blog post from competitor "${competitorName}".
 Title: "${postTitle}"
 Detected category: ${matchedCategory}
 Respond with ONLY valid JSON:
 {"category":"funding or partnership or acquisition or event or hiring or product or other","priority":"high or medium or low","summary":"One sentence explanation"}
-Return ONLY the JSON object.`;
-  try {
-    trackSubrequest();
-    const response = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
-      messages: [{ role: "user", content: prompt }],
-      max_tokens: 200,
-    }), 15000);
-    const content = response.response;
-    if (!content) return { category: matchedCategory, priority: "medium", summary: postTitle };
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
-    return { category: matchedCategory, priority: "medium", summary: postTitle };
+Return ONLY the JSON object.`, { maxTokens: 200 });
+    return result || { category: matchedCategory, priority: "medium", summary: postTitle };
   } catch (error) {
     return { category: matchedCategory, priority: "medium", summary: postTitle };
   }
@@ -350,7 +367,7 @@ function extractBodyText(html) {
 
 const SITE_BLOCKLIST = ["crunchbase.com", "g2.com", "linkedin.com", "twitter.com", "x.com", "facebook.com", "wikipedia.org", "youtube.com", "github.com", "producthunt.com", "trustpilot.com", "capterra.com", "getapp.com", "softwareadvice.com", "reddit.com", "quora.com", "medium.com", "forbes.com", "techcrunch.com"];
 
-async function discoverCompetitors(ai, companyUrl, seedCompetitors) {
+async function discoverCompetitors(env, companyUrl, seedCompetitors) {
   // ── Step 1: Fetch and extract site content ──
   const html = await fetchUrl(companyUrl);
   if (!html) throw new Error("Could not fetch your website. Check the URL and try again.");
@@ -395,14 +412,9 @@ Respond in JSON only. No markdown, no preamble.
 SITE CONTENT:
 ${siteContent.slice(0, 4000)}`;
 
-  const metaResponse = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [{ role: "user", content: metadataPrompt }],
-    max_tokens: 800,
-  }), 15000);
   let productMeta;
   try {
-    const metaJson = (metaResponse.response || "").match(/\{[\s\S]*\}/);
-    productMeta = metaJson ? JSON.parse(metaJson[0]) : null;
+    productMeta = await callClaude(env, metadataPrompt, { maxTokens: 800 });
   } catch { productMeta = null; }
 
   // Fallback if metadata extraction fails
@@ -495,21 +507,13 @@ Rules:
 JSON only:
 {"industry":"${productMeta.category}","market_summary":"2-3 sentences","competitors":[{"name":"","url":"","reason":"","overlap":""}]}`;
 
-  const analysisResponse = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [{ role: "user", content: analysisPrompt }],
-    max_tokens: 2000,
-  }), 15000);
-
-  const content = analysisResponse.response;
-  if (!content) return { industry: productMeta.category, competitors: [], market_summary: "" };
-
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return { industry: productMeta.category, competitors: [], market_summary: "" };
-
   let parsed;
-  try { parsed = JSON.parse(jsonMatch[0]); } catch {
+  try {
+    parsed = await callClaude(env, analysisPrompt, { model: "claude-sonnet-4-5-20250929", maxTokens: 2000 });
+  } catch {
     return { industry: productMeta.category, competitors: [], market_summary: "" };
   }
+  if (!parsed) return { industry: productMeta.category, competitors: [], market_summary: "" };
 
   // Post-process: filter out blocklisted domains, self-references, and invalid URLs
   parsed.competitors = (parsed.competitors || []).filter(c => {
@@ -864,13 +868,22 @@ async function runMonitor(env, configOverride, userId) {
   const config = configOverride || await loadConfig(env, userId);
   const { competitors, settings } = config;
 
+  // Resolve user tier for feature gating
+  let userTier = "command"; // default for self-hosted (full access)
+  if (userId) {
+    try {
+      const uRaw = await env.STATE.get("user:" + userId);
+      if (uRaw) userTier = JSON.parse(uRaw).tier || "scout";
+    } catch {}
+  }
+
   if (competitors.length === 0) {
     console.log("No competitors configured. Visit /setup to add competitors.");
     return [];
   }
 
   console.log(`ScopeHound v3 running at ${new Date().toISOString()}`);
-  console.log(`Monitoring ${competitors.length} competitors`);
+  console.log(`Monitoring ${competitors.length} competitors (tier: ${userTier})`);
   console.log("=".repeat(50));
 
   const alerts = [];
@@ -932,7 +945,7 @@ async function runMonitor(env, configOverride, userId) {
       if (isFirstRun) {
         console.log(`    Indexing (first run)`);
         if (page.type === "pricing") {
-          const pricing = await extractPricingWithLLM(content, env.AI);
+          const pricing = await extractPricingWithLLM(content, env);
           if (pricing) { cs.pricing = pricing; console.log(`    ${pricing.plans?.length || 0} plans extracted`); }
         }
         ps.hash = newHash;
@@ -946,13 +959,13 @@ async function runMonitor(env, configOverride, userId) {
         let pricingChanges = null;
 
         if (page.type === "pricing") {
-          const newPricing = await extractPricingWithLLM(content, env.AI);
+          const newPricing = await extractPricingWithLLM(content, env);
           if (newPricing && cs.pricing) pricingChanges = comparePricing(cs.pricing, newPricing);
           if (newPricing) cs.pricing = newPricing;
-          analysis = await analyzePageChange(env.AI, competitor.name, page.label, page.type, diff);
+          analysis = await analyzePageChange(env, competitor.name, page.label, page.type, diff);
           if (!analysis) analysis = { summary: "Pricing page changed", priority: "high", analysis: "", recommendation: "Review pricing page." };
         } else {
-          analysis = await analyzePageChange(env.AI, competitor.name, page.label, page.type, diff);
+          analysis = await analyzePageChange(env, competitor.name, page.label, page.type, diff);
           if (!analysis) analysis = { summary: "Page content changed", priority: "medium", analysis: "", recommendation: "Review the page." };
         }
 
@@ -975,7 +988,7 @@ async function runMonitor(env, configOverride, userId) {
       cs.pages[page.id] = ps;
     }
 
-    if (competitor.blogRss) {
+    if (competitor.blogRss && hasFeature(userTier, "rss_monitoring")) {
       console.log(`  Blog RSS...`);
       const rssContent = await fetchUrl(competitor.blogRss);
       if (rssContent) {
@@ -993,7 +1006,7 @@ async function runMonitor(env, configOverride, userId) {
               const cat = detectAnnouncement(post.title, keywords);
               if (cat) {
                 console.log(`    Announcement: ${cat} — "${post.title}"`);
-                const cl = await classifyAnnouncement(env.AI, competitor.name, post.title, cat);
+                const cl = await classifyAnnouncement(env, competitor.name, post.title, cat);
                 alerts.push(formatAnnouncementAlert(competitor.name, post, cl));
                 historyEvents.push({
                   date: new Date().toISOString(), competitor: competitor.name,
@@ -1270,7 +1283,7 @@ async function resolveAuth(request, env) {
   }
   const authErr = requireAuth(request, env);
   if (authErr) return { user: null, response: authErr };
-  return { user: { id: "admin", tier: "strategic", email: "admin" }, response: null };
+  return { user: { id: "admin", tier: "command", email: "admin" }, response: null };
 }
 
 // ─── JWT SESSION MANAGEMENT ─────────────────────────────────────────────────
@@ -1455,11 +1468,12 @@ async function verifyStripeSignature(rawBody, sigHeader, secret) {
   }
 }
 
-async function createCheckoutSession(env, user, tier, origin) {
+async function createCheckoutSession(env, user, tier, origin, period) {
   const tierDef = TIERS[tier];
   if (!tierDef) return null;
   const priceIds = env.STRIPE_PRICE_IDS ? JSON.parse(env.STRIPE_PRICE_IDS) : {};
-  const priceId = priceIds[tier];
+  const priceKey = tier + "_" + (period === "annual" ? "annual" : "monthly");
+  const priceId = priceIds[priceKey] || priceIds[tier]; // fallback to old format
   if (!priceId) return null;
   const params = {
     mode: "subscription",
@@ -1606,7 +1620,7 @@ async function handleStripeWebhook(event, env) {
 // ─── TIER ENFORCEMENT ───────────────────────────────────────────────────────
 
 function enforceTierLimits(user, competitors) {
-  const limits = getTierLimits(user?.tier || "recon");
+  const limits = getTierLimits(user?.tier || "scout");
   if (competitors.length > limits.competitors) {
     return { error: `Your ${limits.name} plan allows ${limits.competitors} competitors. Upgrade at /billing.` };
   }
@@ -2072,7 +2086,7 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 .current{background:#12161a;border:1px solid #5c6b3c;border-radius:2px;padding:20px;margin-bottom:32px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
 .current-plan{font-size:18px;font-weight:700;text-transform:uppercase}
 .current-status{font-size:12px;color:#3d6b35;text-transform:uppercase;letter-spacing:0.05em}
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
 .plan{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:20px;display:flex;flex-direction:column}
 .plan.active{border-color:#5c6b3c}
 .plan-name{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px}
@@ -2090,8 +2104,8 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 .manage{text-align:center;margin-top:24px;font-size:13px;color:#6b7280}
 .msg{padding:8px 12px;border-radius:2px;font-size:13px;margin-bottom:16px}
 .msg-ok{background:#3d6b3522;border:1px solid #3d6b35;color:#3d6b35}
-@media(max-width:700px){.grid{grid-template-columns:1fr 1fr}.current{flex-direction:column;align-items:flex-start}}
-@media(max-width:480px){.grid{grid-template-columns:1fr}}
+@media(max-width:700px){.grid{grid-template-columns:1fr 1fr !important}.current{flex-direction:column;align-items:flex-start}}
+@media(max-width:480px){.grid{grid-template-columns:1fr !important}}
 </style>
 </head>
 <body>
@@ -2105,22 +2119,34 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <div id="successMsg"></div>
 <div class="current" id="currentPlan"><div><div class="current-plan" id="planName">Loading...</div><div class="current-status" id="planStatus"></div></div></div>
 <h2>Plans</h2>
-<div class="grid">
-<div class="plan" data-tier="recon"><div class="plan-name">Recon</div><div class="plan-price">$19.99<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Daily scans</li><li>30-day history</li></ul><button class="btn btn-primary" id="btn-recon" onclick="checkout('recon')">Subscribe</button></div>
-<div class="plan" data-tier="operator"><div class="plan-name">Operator</div><div class="plan-price">$49<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>Daily scans</li><li>90-day history</li><li>3 users</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Upgrade</button></div>
-<div class="plan" data-tier="commander"><div class="plan-name">Commander</div><div class="plan-price">$99<span class="mo">/mo</span></div><ul class="plan-features"><li>25 competitors</li><li>100 pages</li><li>2x daily</li><li>1-year history</li><li>10 users</li></ul><button class="btn btn-primary" id="btn-commander" onclick="checkout('commander')">Upgrade</button></div>
-<div class="plan" data-tier="strategic"><div class="plan-name">Strategic</div><div class="plan-price">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>4x daily</li><li>Unlimited history</li><li>Unlimited users</li></ul><button class="btn btn-primary" id="btn-strategic" onclick="checkout('strategic')">Upgrade</button></div>
+<div style="text-align:center;margin-bottom:16px"><span id="toggleLabel" style="font-size:12px;color:#6b7280">Monthly</span><label style="display:inline-block;vertical-align:middle;margin:0 8px;width:40px;height:22px;position:relative;cursor:pointer"><input type="checkbox" id="billingToggle" style="display:none" onchange="toggleBilling()"><span style="position:absolute;inset:0;background:#2a3038;border-radius:11px;transition:0.3s"></span><span id="toggleDot" style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#d4d8de;border-radius:50%;transition:0.3s"></span></label><span style="font-size:12px;color:#6b7280">Annual <span style="color:#5c6b3c;font-weight:700">Save 17%</span></span></div>
+<div class="grid" style="grid-template-columns:repeat(3,1fr)">
+<div class="plan" data-tier="scout"><div class="plan-name">Scout</div><div class="plan-price" data-monthly="29" data-annual="290">$29<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Manual scans only</li><li>30-day history</li><li>Dashboard + Slack alerts</li></ul><button class="btn btn-primary" id="btn-scout" onclick="checkout('scout')">Subscribe</button></div>
+<div class="plan" data-tier="operator" style="border-color:#5c6b3c;position:relative"><div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#5c6b3c;color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;padding:2px 10px;border-radius:2px">Recommended</div><div class="plan-name">Operator</div><div class="plan-price" data-monthly="79" data-annual="790">$79<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>2x daily scans</li><li>1-year history</li><li>AI competitor discovery</li><li>RSS/blog monitoring</li><li>/scan + /ads commands</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Subscribe</button></div>
+<div class="plan" data-tier="command"><div class="plan-name">Command</div><div class="plan-price" data-monthly="199" data-annual="1990">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>4x daily scans</li><li>Unlimited history</li><li>Everything in Operator</li><li>Priority scan queue</li><li>Competitor Radar (soon)</li></ul><button class="btn btn-primary" id="btn-command" onclick="checkout('command')">Subscribe</button></div>
 </div>
 <div class="manage" id="manageSection" style="display:none"><a href="#" onclick="manageSubscription();return false">Manage subscription on Stripe</a></div>
 </div>
 <script>
+let billingPeriod="monthly";
+function toggleBilling(){
+  const on=document.getElementById("billingToggle").checked;
+  billingPeriod=on?"annual":"monthly";
+  document.getElementById("toggleDot").style.left=on?"21px":"3px";
+  document.getElementById("toggleDot").parentElement.previousElementSibling.style.background=on?"#5c6b3c":"#2a3038";
+  document.querySelectorAll(".plan-price").forEach(el=>{
+    const m=el.dataset.monthly,a=el.dataset.annual;
+    if(on){el.innerHTML="$"+a+'<span class="mo">/yr</span>';}
+    else{el.innerHTML="$"+m+'<span class="mo">/mo</span>';}
+  });
+}
 async function loadProfile(){
   try{const r=await fetch("/api/user/profile");if(!r.ok)return;const u=await r.json();
   if(u.email){document.getElementById("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}
   document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"NO PLAN";
   document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"Choose a plan to get started";
   const tier=u.tier;
-  const tierOrder=["recon","operator","commander","strategic"];
+  const tierOrder=["scout","operator","command"];
   document.querySelectorAll(".plan").forEach(p=>{const t=p.dataset.tier;const btn=p.querySelector("button");
   if(!tier){btn.textContent="Subscribe";btn.className="btn btn-primary";btn.onclick=function(){checkout(t);};}
   else if(t===tier){p.classList.add("active");btn.className="btn btn-current";btn.textContent="Current Plan";btn.onclick=null;}
@@ -2151,7 +2177,7 @@ async function waitForSubscription(){
   bar.style.width="100%";bar.style.background="#c44";
   status.textContent="Taking longer than expected. Please refresh the page.";
 }
-async function checkout(tier){try{const r=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
+async function checkout(tier){try{const r=await fetch("/api/checkout",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier,period:billingPeriod})});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
 async function manageSubscription(){try{const r=await fetch("/api/billing/portal",{method:"POST"});const d=await r.json();if(d.url)location.href=d.url;else alert(d.error||"Failed");}catch(e){alert(e.message);}}
 loadProfile();
 </script>
@@ -2334,10 +2360,12 @@ Add to Slack
 let currentStep=1,slackVerified=false,slackSkipped=false,competitors=[];
 async function loadUserInfo(){
   try{const r=await fetch("/api/user/profile");if(r.ok){const u=await r.json();
-  const t=u.tier||"recon";const limits={recon:{c:3,p:6},operator:{c:15,p:60},commander:{c:25,p:100},strategic:{c:50,p:200}};
-  const l=limits[t]||limits.recon;
+  const t=u.tier||"scout";const limits={scout:{c:3,p:6},operator:{c:15,p:60},command:{c:50,p:200}};
+  const l=limits[t]||limits.scout;
   document.getElementById("tierInfo").innerHTML="You can add up to <strong>"+l.c+" competitors</strong> on your "+t.charAt(0).toUpperCase()+t.slice(1)+" plan.";
   window._tierLimits=l;window._tier=t;
+  // Hide AI discovery for Scout (not available on their plan)
+  if(t==="scout"){const ai=document.getElementById("aiDiscover");if(ai){ai.innerHTML='<div style="padding:16px;text-align:center"><p style="font-size:13px;color:#6b7280;margin-bottom:8px">AI competitor discovery is available on the Operator plan.</p><a href="/billing" style="font-size:12px">Upgrade to unlock</a></div>';}}
   if(u.email){document.getElementById("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}}catch(e){}
   // Check if Slack was just connected via OAuth
   if(new URLSearchParams(location.search).get("slack")==="connected"){
@@ -2560,7 +2588,7 @@ function renderReview(){
     '<div class="review-item"><span class="review-label">Slack</span><span>Connected</span></div>'
     +'<div class="review-item"><span class="review-label">Competitors</span><span>'+ready.length+'</span></div>'
     +'<div class="review-item"><span class="review-label">Pages monitored</span><span>'+totalPages+'</span></div>'
-    +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"recon").charAt(0).toUpperCase()+(window._tier||"recon").slice(1)+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"scout").charAt(0).toUpperCase()+(window._tier||"scout").slice(1)+'</span></div>'
     +'<div class="review-item"><span class="review-label">Schedule</span><span>Daily at 9am UTC</span></div>';
 }
 function scanProgress(steps){
@@ -2739,6 +2767,10 @@ else{fetch("/api/partner/stats?code="+code+"&email="+email).then(r=>r.json()).th
 
 export default {
   async scheduled(event, env, ctx) {
+    const slot = new Date(event.scheduledTime).getUTCHours(); // 3, 9, 15, or 21
+    const OPERATOR_SLOTS = [9, 21];
+    // Command runs all 4 slots (3, 9, 15, 21)
+
     if (isHostedMode(env)) {
       ctx.waitUntil((async () => {
         const raw = await env.STATE.get("active_subscribers");
@@ -2756,7 +2788,6 @@ export default {
             if (user.subscriptionStatus !== "active") continue;
             list.push(id);
             console.log(`[self-repair] Re-added ${user.email} to active_subscribers`);
-            // Notify via their Slack
             const cfg = await loadConfig(env, id);
             if (cfg.settings.slackWebhookUrl) {
               await sendSlack(cfg.settings.slackWebhookUrl, "🐺 *ScopeHound Notice*\n\nYour account was missing from the daily scan list and has been automatically repaired. Scans will now run normally.");
@@ -2786,7 +2817,20 @@ export default {
             if (!uRaw) continue;
             const user = JSON.parse(uRaw);
             if (user.subscriptionStatus !== "active") continue;
-            console.log(`Running scan for user ${user.email} (${user.tier})`);
+            const tier = user.tier || "scout";
+
+            // Scout: no scheduled scans (manual only)
+            if (!hasFeature(tier, "scheduled_scans")) {
+              console.log(`Skipping ${user.email} (${tier}) — manual scans only`);
+              continue;
+            }
+            // Operator: only runs at 9am and 9pm UTC slots
+            if (tier === "operator" && !OPERATOR_SLOTS.includes(slot)) {
+              console.log(`Skipping ${user.email} (operator) — not their scan slot (hour ${slot})`);
+              continue;
+            }
+            // Command: runs all 4 slots
+            console.log(`Running scan for ${user.email} (${tier}) at slot ${slot}`);
             await runMonitor(env, null, userId);
           } catch (e) {
             console.log(`Scan failed for user ${userId}: ${e.message}`);
@@ -3006,8 +3050,8 @@ export default {
 
         // ── /ads command ──
         if (command === "/ads") {
-          if (user.tier !== "commander" && user.tier !== "strategic") {
-            return jsonResponse({ response_type: "ephemeral", text: "The `/ads` command is available on Commander and Strategic plans. Upgrade at worker.scopehound.app/billing" });
+          if (!hasFeature(user.tier, "slash_ads")) {
+            return jsonResponse({ response_type: "ephemeral", text: "The `/ads` command is available on Operator and Command plans. Upgrade at worker.scopehound.app/billing" });
           }
           if (!text) return jsonResponse({ response_type: "ephemeral", text: "Usage: `/ads <domain>` — e.g. `/ads acme.com`" });
           let domain = text.replace(/^https?:\/\//i, "").replace(/^www\./, "").replace(/\/.*$/, "").toLowerCase();
@@ -3063,7 +3107,7 @@ export default {
         if (text.startsWith("add ")) {
           let compUrl = text.slice(4).trim();
           if (!/^https?:\/\//i.test(compUrl)) compUrl = "https://" + compUrl;
-          const limits = getTierLimits(user.tier || "recon");
+          const limits = getTierLimits(user.tier || "scout");
           if (comps.length >= limits.competitors) {
             return jsonResponse({ response_type: "ephemeral", text: `You've reached your ${limits.name} plan limit of ${limits.competitors} competitors. Upgrade at worker.scopehound.app/billing` });
           }
@@ -3108,8 +3152,10 @@ export default {
         }
 
         if (text === "scan") {
+          if (!hasFeature(user.tier, "slash_scan")) {
+            return jsonResponse({ response_type: "ephemeral", text: "The `/scopehound scan` command is available on Operator and Command plans. You can still trigger scans from your dashboard. Upgrade at worker.scopehound.app/billing" });
+          }
           const config = await loadConfig(env, userId);
-          jsonResponse({ response_type: "ephemeral", text: "Starting scan... Results will appear in your channel." });
           ctx.waitUntil((async () => {
             await runMonitor(env, config, userId);
           })());
@@ -3144,8 +3190,9 @@ export default {
         try {
           const body = await request.json();
           const tier = body.tier;
+          const period = body.period === "annual" ? "annual" : "monthly";
           if (!tier || !TIERS[tier]) return jsonResponse({ error: "Invalid tier" }, 400);
-          const session = await createCheckoutSession(env, user, tier, url.origin);
+          const session = await createCheckoutSession(env, user, tier, url.origin, period);
           if (!session || !session.url) return jsonResponse({ error: session?.error?.message || "Failed to create checkout" }, 400);
           return jsonResponse({ url: session.url });
         } catch (e) {
@@ -3391,13 +3438,16 @@ export default {
     if (path === "/api/config/discover-competitors" && request.method === "POST") {
       const { user, response } = await resolveAuth(request, env);
       if (response) return response;
+      if (!hasFeature(user.tier || "scout", "ai_discovery")) {
+        return jsonResponse({ error: "AI competitor discovery is available on the Operator plan. Upgrade to let ScopeHound automatically find and track your competitors." }, 403);
+      }
       try {
         const body = await request.json();
         if (!body.url) return jsonResponse({ error: "url required" }, 400);
         let compUrl = body.url.trim();
         if (!/^https?:\/\//i.test(compUrl)) compUrl = "https://" + compUrl;
         const seeds = Array.isArray(body.seeds) ? body.seeds.map(s => s.trim()).filter(Boolean) : [];
-        const result = await discoverCompetitors(env.AI, compUrl, seeds);
+        const result = await discoverCompetitors(env, compUrl, seeds);
         return jsonResponse(result);
       } catch (e) {
         return jsonResponse({ error: e.message }, 400);
