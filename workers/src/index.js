@@ -120,8 +120,23 @@ function resetSubrequestCounter() { _subrequestCount = 0; }
 function canSubrequest() { return _subrequestCount < SUBREQUEST_LIMIT; }
 function trackSubrequest() { _subrequestCount++; }
 
+// SSRF protection — block private/reserved IPs and non-HTTP schemes
+function isUrlSafe(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+    const host = u.hostname;
+    // Block private/reserved IP ranges and localhost
+    if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.|169\.254\.|fc|fd|fe80|::1|localhost|0\.0\.0\.0)/i.test(host)) return false;
+    // Block metadata endpoints
+    if (host === "metadata.google.internal" || host === "169.254.169.254") return false;
+    return true;
+  } catch { return false; }
+}
+
 async function fetchUrl(url) {
   if (!canSubrequest()) { console.log(`  Skipped (subrequest budget: ${_subrequestCount}/${SUBREQUEST_LIMIT})`); return null; }
+  if (!isUrlSafe(url)) { console.log(`  Blocked (SSRF protection): ${url}`); return null; }
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -240,7 +255,7 @@ async function callClaude(env, prompt, { model = "claude-haiku-4-5-20251001", ma
     body: JSON.stringify(body),
   }), 30000);
   if (!response.ok) {
-    console.log(`[Claude API] ${response.status}: ${await response.text().catch(() => "")}`);
+    console.log(`[Claude API] ${response.status}`);
     return null;
   }
   const data = await response.json();
@@ -669,6 +684,7 @@ function formatDigestHeader(alerts) {
 
 async function sendSlack(webhookUrl, message) {
   if (!webhookUrl) { console.log(`[SLACK skip] ${message.slice(0, 80)}`); return { ok: false, error: "no_webhook_url" }; }
+  if (!isUrlSafe(webhookUrl)) { return { ok: false, error: "invalid_webhook_url" }; }
   try {
     trackSubrequest();
     const r = await fetch(webhookUrl, {
@@ -1085,7 +1101,7 @@ async function runMonitor(env, configOverride, userId) {
 
   // ── SEND ALERTS (batched into single Slack message to conserve subrequests) ──
   const slackResults = [];
-  console.log(`\nSlack URL: ${slackUrl ? "set (" + slackUrl.slice(0, 40) + "...)" : "MISSING"}`);
+  console.log(`\nSlack URL: ${slackUrl ? "configured" : "MISSING"}`);
   if (alerts.length > 0) {
     console.log(`Sending ${alerts.length} alert(s) to Slack (batched)...`);
     const parts = [formatDigestHeader(alerts)];
@@ -1137,6 +1153,123 @@ async function buildDashboardCache(env, state, history, competitors, userId) {
   };
   const cacheKey = userId ? "user_state:" + userId + ":dashboard" : "dashboard_cache";
   await env.STATE.put(cacheKey, JSON.stringify(cache));
+}
+
+// ─── ADMIN KPI AGGREGATION ───────────────────────────────────────────────────
+
+async function aggregateKPIs(env) {
+  const TIER_PRICES = { scout: 29, operator: 79, command: 199 };
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const sevenDaysAgo = new Date(now - 7 * 86400000);
+  const fourteenDaysAgo = new Date(now - 14 * 86400000);
+  const thirtyDaysAgo = new Date(now - 30 * 86400000);
+
+  const kpis = {
+    generatedAt: now.toISOString(),
+    users: { total: 0, active: 0, churned: 0, churnRate: "0%", byTier: {}, recentSignups: [] },
+    revenue: { estimatedMRR: 0, estimatedARR: 0, planDistribution: {} },
+    engagement: { dau: 0, wau: 0, nurr: "0%", curr: "0%" },
+    acquisition: { bySource: {}, byMedium: {}, byCampaign: {} },
+  };
+
+  // Helper counters for NURR/CURR
+  let newUsersLast30d = 0, newUsersActiveLast7d = 0;
+  let activeThisWeek = 0, activeBothWeeks = 0, activeLastWeekOnly = 0;
+
+  // ── Scan all user records (paginated for >1000 users) ──
+  let cursor = undefined;
+  do {
+    const listResult = await env.STATE.list({ prefix: "user:", cursor });
+    for (const key of listResult.keys) {
+      if (key.name.includes("_")) continue; // Skip user_email:, user_config:, user_state:
+      try {
+        const raw = await env.STATE.get(key.name);
+        if (!raw) continue;
+        const u = JSON.parse(raw);
+        kpis.users.total++;
+
+        const tier = u.tier || "none";
+        kpis.users.byTier[tier] = (kpis.users.byTier[tier] || 0) + 1;
+
+        if (u.subscriptionStatus === "active") {
+          kpis.users.active++;
+          if (TIER_PRICES[tier]) {
+            kpis.revenue.estimatedMRR += TIER_PRICES[tier];
+            kpis.revenue.planDistribution[tier] = (kpis.revenue.planDistribution[tier] || 0) + 1;
+          }
+        } else if (u.subscriptionStatus === "canceled") {
+          kpis.users.churned++;
+        }
+
+        // DAU / WAU
+        if (u.lastActive) {
+          if (u.lastActive === today) kpis.engagement.dau++;
+          if (new Date(u.lastActive) >= sevenDaysAgo) {
+            kpis.engagement.wau++;
+            activeThisWeek++;
+          }
+          // Active in both this week and last week (for CURR)
+          const lastActiveDate = new Date(u.lastActive);
+          if (lastActiveDate >= fourteenDaysAgo && lastActiveDate < sevenDaysAgo) {
+            activeLastWeekOnly++;
+          }
+          if (lastActiveDate >= sevenDaysAgo) {
+            // Check if they were also active last week by looking at lastActive history
+            // Since we only store latest lastActive, approximate: if user was active this week,
+            // count them for the "both weeks" bucket if they signed up before this week
+            if (u.createdAt && new Date(u.createdAt) < sevenDaysAgo) {
+              activeBothWeeks++;
+            }
+          }
+        }
+
+        // NURR: new users (≤30d) who were active in last 7d
+        if (u.createdAt && new Date(u.createdAt) >= thirtyDaysAgo) {
+          newUsersLast30d++;
+          if (u.lastActive && new Date(u.lastActive) >= sevenDaysAgo) {
+            newUsersActiveLast7d++;
+          }
+        }
+
+        // UTM acquisition
+        if (u.utmSource) kpis.acquisition.bySource[u.utmSource] = (kpis.acquisition.bySource[u.utmSource] || 0) + 1;
+        if (u.utmMedium) kpis.acquisition.byMedium[u.utmMedium] = (kpis.acquisition.byMedium[u.utmMedium] || 0) + 1;
+        if (u.utmCampaign) kpis.acquisition.byCampaign[u.utmCampaign] = (kpis.acquisition.byCampaign[u.utmCampaign] || 0) + 1;
+
+        // Recent signups (last 30 days)
+        if (u.createdAt && new Date(u.createdAt) >= thirtyDaysAgo) {
+          kpis.users.recentSignups.push({
+            email: u.email,
+            tier: u.tier,
+            status: u.subscriptionStatus,
+            source: u.utmSource || null,
+            createdAt: u.createdAt,
+          });
+        }
+      } catch (e) { /* skip malformed records */ }
+    }
+    cursor = listResult.list_complete ? undefined : listResult.cursor;
+  } while (cursor);
+
+  // Compute derived metrics
+  kpis.users.churnRate = kpis.users.total > 0 ? ((kpis.users.churned / kpis.users.total) * 100).toFixed(1) + "%" : "0%";
+  kpis.revenue.estimatedARR = kpis.revenue.estimatedMRR * 12;
+  kpis.engagement.nurr = newUsersLast30d > 0 ? ((newUsersActiveLast7d / newUsersLast30d) * 100).toFixed(1) + "%" : "N/A";
+  const lastWeekTotal = activeLastWeekOnly + activeBothWeeks;
+  kpis.engagement.curr = lastWeekTotal > 0 ? ((activeBothWeeks / lastWeekTotal) * 100).toFixed(1) + "%" : "N/A";
+
+  // Sort UTM tables descending by count
+  const sortObj = (obj) => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  kpis.acquisition.bySource = sortObj(kpis.acquisition.bySource);
+  kpis.acquisition.byMedium = sortObj(kpis.acquisition.byMedium);
+  kpis.acquisition.byCampaign = sortObj(kpis.acquisition.byCampaign);
+
+  // Sort recent signups newest first, limit to 20
+  kpis.users.recentSignups.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  kpis.users.recentSignups = kpis.users.recentSignups.slice(0, 20);
+
+  return kpis;
 }
 
 // ─── RSS AUTO-DETECTION ─────────────────────────────────────────────────────
@@ -1244,25 +1377,36 @@ async function discoverPages(websiteUrl) {
 // ─── AUTH ────────────────────────────────────────────────────────────────────
 
 function requireAuth(request, env) {
-  const token = request.headers.get("X-Admin-Token") || new URL(request.url).searchParams.get("token");
+  const token = request.headers.get("X-Admin-Token");
   if (!env.ADMIN_TOKEN) {
     return new Response(JSON.stringify({ error: "ADMIN_TOKEN secret not set. Add it in Cloudflare dashboard → Settings → Variables." }), {
       status: 500, headers: { "Content-Type": "application/json" },
     });
   }
   if (!token || token !== env.ADMIN_TOKEN) {
-    return new Response(JSON.stringify({ error: "Unauthorized. Provide X-Admin-Token header or ?token= param." }), {
+    return new Response(JSON.stringify({ error: "Unauthorized. Provide X-Admin-Token header." }), {
       status: 401, headers: { "Content-Type": "application/json" },
     });
   }
   return null;
 }
 
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+};
+
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    headers: { "Content-Type": "application/json", ...SECURITY_HEADERS },
   });
+}
+
+function htmlResponse(html) {
+  return new Response(html, { headers: { "Content-Type": "text/html;charset=utf-8", ...SECURITY_HEADERS } });
 }
 
 // ─── MODE DETECTION ─────────────────────────────────────────────────────────
@@ -1278,6 +1422,12 @@ async function resolveAuth(request, env) {
       return { user: null, response: new Response(JSON.stringify({ error: "Not authenticated" }), {
         status: 401, headers: { "Content-Type": "application/json" },
       })};
+    }
+    // Track daily activity for DAU/WAU metrics (1 KV write per user per day)
+    const today = new Date().toISOString().slice(0, 10);
+    if (user.lastActive !== today) {
+      user.lastActive = today;
+      env.STATE.put("user:" + user.id, JSON.stringify(user)).catch(() => {});
     }
     return { user, response: null };
   }
@@ -1357,6 +1507,62 @@ function clearSessionCookie(headers) {
   headers.append("Set-Cookie", "sh_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
 }
 
+// ─── ADMIN SESSION MANAGEMENT ───────────────────────────────────────────────
+
+async function verifyAdminPassword(password, expectedHash) {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(password));
+  const hashHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+  if (hashHex.length !== expectedHash.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < hashHex.length; i++) mismatch |= hashHex.charCodeAt(i) ^ expectedHash.charCodeAt(i);
+  return mismatch === 0;
+}
+
+async function createAdminSession(env) {
+  const secret = env.JWT_SECRET || env.ADMIN_TOKEN;
+  if (!secret) return null;
+  return await generateJWT({
+    sub: "platform_admin",
+    role: "admin",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 8 * 3600,
+  }, secret);
+}
+
+async function getAdminSession(request, env) {
+  const secret = env.JWT_SECRET || env.ADMIN_TOKEN;
+  if (!secret) return null;
+  const cookies = request.headers.get("Cookie") || "";
+  const match = cookies.match(/sh_admin=([^;]+)/);
+  if (!match) return null;
+  const payload = await verifyJWT(match[1], secret);
+  if (!payload || payload.role !== "admin") return null;
+  return payload;
+}
+
+function setAdminSessionCookie(headers, token) {
+  headers.append("Set-Cookie", `sh_admin=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800`);
+}
+
+function clearAdminSessionCookie(headers) {
+  headers.append("Set-Cookie", "sh_admin=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0");
+}
+
+async function checkAdminLoginRateLimit(env, ip) {
+  const raw = await env.STATE.get("admin_login_attempts:" + ip);
+  return !raw || parseInt(raw) < 5;
+}
+
+async function recordAdminLoginAttempt(env, ip, success) {
+  const key = "admin_login_attempts:" + ip;
+  if (success) {
+    await env.STATE.delete(key);
+  } else {
+    const raw = await env.STATE.get(key);
+    await env.STATE.put(key, String((raw ? parseInt(raw) : 0) + 1), { expirationTtl: 900 });
+  }
+}
+
 // ─── OAUTH PROVIDERS ────────────────────────────────────────────────────────
 
 function getGoogleAuthUrl(env, origin, state) {
@@ -1395,7 +1601,7 @@ async function getGoogleUserInfo(accessToken) {
   return await r.json();
 }
 
-async function findOrCreateUser(env, provider, profile, refCode) {
+async function findOrCreateUser(env, provider, profile, refCode, utm) {
   // Check if user exists by email
   const existingId = await env.STATE.get("user_email:" + profile.email);
   if (existingId) {
@@ -1416,6 +1622,9 @@ async function findOrCreateUser(env, provider, profile, refCode) {
     stripeSubscriptionId: null,
     subscriptionStatus: null,
     referredBy: refCode || null,
+    utmSource: utm?.source || null,
+    utmMedium: utm?.medium || null,
+    utmCampaign: utm?.campaign || null,
     createdAt: new Date().toISOString(),
   };
   await Promise.all([
@@ -1790,7 +1999,7 @@ function renderSeo(){let h='<table><thead><tr><th>Competitor</th><th>Page</th><t
 const tabs={overview:renderOverview,changes:renderChanges,pricing:renderPricing,seo:renderSeo};
 document.querySelectorAll("nav button").forEach(btn=>{btn.addEventListener("click",()=>{document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));btn.classList.add("active");if(DATA)tabs[btn.dataset.tab]();});});
 fetch("./api/dashboard-data").then(r=>r.json()).then(d=>{DATA=d;$("lastUpdated").textContent="Last scan: "+timeAgo(d.generatedAt);renderOverview();}).catch(()=>{content.innerHTML='<div class="empty">Failed to load data. <a href="./setup">Run setup</a> or hit /test first.</div>';});
-fetch("./api/user/profile").then(r=>r.ok?r.json():null).then(u=>{if(u&&u.email){$("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}).catch(()=>{});
+fetch("./api/user/profile").then(r=>r.ok?r.json():null).then(u=>{if(u&&u.email){$("userBar").innerHTML=esc(u.email)+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}).catch(()=>{});
 </script>
 </body>
 </html>`;
@@ -1890,6 +2099,7 @@ input:focus{border-color:#5c6b3c}
 </div>
 
 <script>
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 let step=0;
 const comps=[];
 let existingConfig=null;
@@ -1923,13 +2133,13 @@ function renderComps(){
   for(let i=0;i<comps.length;i++){
     const c=comps[i];
     h+='<div class="competitor-card"><div class="card-header"><strong>Competitor '+(i+1)+'</strong><button class="btn btn-danger btn-sm" onclick="removeComp('+i+')">Remove</button></div>';
-    h+='<div class="row"><div class="field"><label>Name</label><input type="text" value="'+esc(c.name)+'" onchange="comps['+i+'].name=this.value"></div><div class="field"><label>Website</label><input type="url" value="'+esc(c.website)+'" onchange="comps['+i+'].website=this.value;autoFill('+i+',this.value)" placeholder="https://example.com"></div></div>';
-    h+='<div class="row"><div class="field"><label>Pricing URL</label><input type="url" id="pricing'+i+'" value="'+esc(c.pricingUrl)+'" onchange="comps['+i+'].pricingUrl=this.value"></div><div class="field"><label>Blog RSS</label><div style="display:flex;gap:6px"><input type="url" id="rss'+i+'" value="'+esc(c.blogRss)+'" onchange="comps['+i+'].blogRss=this.value" style="flex:1" placeholder="Optional"><button class="btn btn-secondary btn-sm" onclick="detectRss('+i+')">Detect</button></div></div></div></div>';
+    h+='<div class="row"><div class="field"><label>Name</label><input type="text" value="'+escAttr(c.name)+'" onchange="comps['+i+'].name=this.value"></div><div class="field"><label>Website</label><input type="url" value="'+escAttr(c.website)+'" onchange="comps['+i+'].website=this.value;autoFill('+i+',this.value)" placeholder="https://example.com"></div></div>';
+    h+='<div class="row"><div class="field"><label>Pricing URL</label><input type="url" id="pricing'+i+'" value="'+escAttr(c.pricingUrl)+'" onchange="comps['+i+'].pricingUrl=this.value"></div><div class="field"><label>Blog RSS</label><div style="display:flex;gap:6px"><input type="url" id="rss'+i+'" value="'+escAttr(c.blogRss)+'" onchange="comps['+i+'].blogRss=this.value" style="flex:1" placeholder="Optional"><button class="btn btn-secondary btn-sm" onclick="detectRss('+i+')">Detect</button></div></div></div></div>';
   }
   $("compList").innerHTML=h;
 }
 
-function esc(s){return(s||"").replace(/"/g,"&quot;").replace(/</g,"&lt;")}
+function escAttr(s){return(s||"").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
 
 function autoFill(i,url){
   if(!url)return;
@@ -1956,8 +2166,8 @@ async function testSlack(){
   try{
     const r=await fetch(base+"/api/config/test-slack",{method:"POST",headers:{"Content-Type":"application/json","X-Admin-Token":tok},body:JSON.stringify({webhookUrl:url})});
     const d=await r.json();
-    $("slackMsg").innerHTML=d.success?'<div class="msg msg-ok">Connected! Check your Slack channel.</div>':'<div class="msg msg-err">'+(d.error||"Failed")+'</div>';
-  }catch(e){$("slackMsg").innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
+    $("slackMsg").innerHTML=d.success?'<div class="msg msg-ok">Connected! Check your Slack channel.</div>':'<div class="msg msg-err">'+esc(d.error||"Failed")+'</div>';
+  }catch(e){$("slackMsg").innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';}
 }
 
 function renderSummary(){
@@ -1991,14 +2201,14 @@ async function launch(){
     const h={"Content-Type":"application/json","X-Admin-Token":tok};
     const [r1,r2]=await Promise.all([fetch(base+"/api/config/competitors",{method:"POST",headers:h,body:JSON.stringify({competitors})}),fetch(base+"/api/config/settings",{method:"POST",headers:h,body:JSON.stringify(settings)})]);
     const d1=await r1.json(),d2=await r2.json();
-    if(!d1.success||!d2.success){$("launchMsg").innerHTML='<div class="msg msg-err">Save failed: '+(d1.error||d2.error||"unknown")+'</div>';$("launchBtn").disabled=false;$("launchBtn").textContent="Save & Run First Scan";return;}
+    if(!d1.success||!d2.success){$("launchMsg").innerHTML='<div class="msg msg-err">Save failed: '+esc(d1.error||d2.error||"unknown")+'</div>';$("launchBtn").disabled=false;$("launchBtn").textContent="Save & Run First Scan";return;}
     $("launchBtn").textContent="Running first scan...";
     $("launchMsg").innerHTML='<div class="msg msg-info">Config saved. Running first scan (this may take a minute)...</div>';
     const r3=await fetch(base+"/api/config/trigger-scan",{method:"POST",headers:h});
     const d3=await r3.json();
     $("launchMsg").innerHTML='<div class="msg msg-ok">Done! Indexed '+competitors.length+' competitors. Redirecting to dashboard...</div>';
     setTimeout(()=>location.href=base+"/dashboard",2000);
-  }catch(e){$("launchMsg").innerHTML='<div class="msg msg-err">Error: '+e.message+'</div>';$("launchBtn").disabled=false;$("launchBtn").textContent="Save & Run First Scan";}
+  }catch(e){$("launchMsg").innerHTML='<div class="msg msg-err">Error: '+esc(e.message)+'</div>';$("launchBtn").disabled=false;$("launchBtn").textContent="Save & Run First Scan";}
 }
 
 // Load existing config on page load
@@ -2128,6 +2338,7 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <div class="manage" id="manageSection" style="display:none"><a href="#" onclick="manageSubscription();return false">Manage subscription on Stripe</a></div>
 </div>
 <script>
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 let billingPeriod="monthly";
 function toggleBilling(){
   const on=document.getElementById("billingToggle").checked;
@@ -2142,7 +2353,7 @@ function toggleBilling(){
 }
 async function loadProfile(){
   try{const r=await fetch("/api/user/profile");if(!r.ok)return;const u=await r.json();
-  if(u.email){document.getElementById("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}
+  if(u.email){document.getElementById("userBar").innerHTML=esc(u.email)+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}
   document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"NO PLAN";
   document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"Choose a plan to get started";
   const tier=u.tier;
@@ -2357,6 +2568,7 @@ Add to Slack
 </div>
 </div>
 <script>
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 let currentStep=1,slackVerified=false,slackSkipped=false,competitors=[];
 async function loadUserInfo(){
   try{const r=await fetch("/api/user/profile");if(r.ok){const u=await r.json();
@@ -2366,7 +2578,7 @@ async function loadUserInfo(){
   window._tierLimits=l;window._tier=t;
   // Hide AI discovery for Scout (not available on their plan)
   if(t==="scout"){const ai=document.getElementById("aiDiscover");if(ai){ai.innerHTML='<div style="padding:16px;text-align:center"><p style="font-size:13px;color:#6b7280;margin-bottom:8px">AI competitor discovery is available on the Operator plan.</p><a href="/billing" style="font-size:12px">Upgrade to unlock</a></div>';}}
-  if(u.email){document.getElementById("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}}catch(e){}
+  if(u.email){document.getElementById("userBar").innerHTML=esc(u.email)+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}}catch(e){}
   // Check if Slack was just connected via OAuth
   if(new URLSearchParams(location.search).get("slack")==="connected"){
     slackVerified=true;
@@ -2417,8 +2629,8 @@ async function testSlack(){
   document.getElementById("skipLink").style.display="none";
   // Save webhook URL
   await fetch("/api/config/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({slackWebhookUrl:u})});
-  }else{document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+(d.error||"Failed to connect.")+'</div>';}
-  }catch(e){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
+  }else{document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+esc(d.error||"Failed to connect.")+'</div>';}
+  }catch(e){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';}
 }
 let aiSuggestions=[];
 async function findCompetitors(){
@@ -2441,21 +2653,22 @@ async function findCompetitors(){
     const r=await fetch("/api/config/discover-competitors",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u,seeds:seeds})});
     clearInterval(statusInterval);
     const d=await r.json();
-    if(d.error){el.innerHTML='<div class="msg msg-err">'+d.error+'</div>';return;}
+    if(d.error){el.innerHTML='<div class="msg msg-err">'+esc(d.error)+'</div>';return;}
     aiSuggestions=d.competitors||[];
     if(aiSuggestions.length===0){el.innerHTML='<div class="msg">No competitors found. Try adding them manually below.</div>';return;}
     const overlapColors={direct:"#7a8c52",adjacent:"#c9952e",broader_platform:"#6b7280"};
     const overlapLabels={direct:"Direct",adjacent:"Adjacent",broader_platform:"Broader Platform"};
-    let html='<div style="font-size:12px;color:#6b7280;margin:12px 0 8px">Industry: <strong style="color:#7a8c52">'+((d.industry||"").charAt(0).toUpperCase()+(d.industry||"").slice(1))+'</strong></div>';
-    if(d.market_summary)html+='<div style="font-size:12px;color:#9ca3af;margin:0 0 12px;line-height:1.5">'+d.market_summary+'</div>';
+    const ind=esc((d.industry||"").charAt(0).toUpperCase()+(d.industry||"").slice(1));
+    let html='<div style="font-size:12px;color:#6b7280;margin:12px 0 8px">Industry: <strong style="color:#7a8c52">'+ind+'</strong></div>';
+    if(d.market_summary)html+='<div style="font-size:12px;color:#9ca3af;margin:0 0 12px;line-height:1.5">'+esc(d.market_summary)+'</div>';
     html+='<div style="font-size:12px;color:#6b7280;margin:0 0 8px">Select competitors to add:</div>';
     html+=aiSuggestions.map((c,i)=>{
       const badge=c.overlap&&overlapLabels[c.overlap]?'<span style="font-size:10px;background:'+overlapColors[c.overlap]+'22;color:'+overlapColors[c.overlap]+';padding:2px 6px;border-radius:4px;margin-left:8px">'+overlapLabels[c.overlap]+'</span>':"";
-      return '<div class="ai-result" onclick="toggleAiResult(event,this,'+i+')"><input type="checkbox" id="aicheck'+i+'" onchange="onAiCheck('+i+')"><div><div class="ai-name">'+c.name+badge+'</div><div class="ai-url">'+c.url+'</div><div class="ai-reason">'+(c.reason||c.description||"")+'</div></div></div>';
+      return '<div class="ai-result" onclick="toggleAiResult(event,this,'+i+')"><input type="checkbox" id="aicheck'+i+'" onchange="onAiCheck('+i+')"><div><div class="ai-name">'+esc(c.name)+badge+'</div><div class="ai-url">'+esc(c.url)+'</div><div class="ai-reason">'+esc(c.reason||c.description||"")+'</div></div></div>';
     }).join("");
     html+='<button class="btn btn-primary btn-sm" onclick="addSelectedAi()" style="margin-top:12px" id="addAiBtn" disabled>Add Selected Competitors</button>';
     el.innerHTML=html;
-  }catch(e){clearInterval(statusInterval);el.innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
+  }catch(e){clearInterval(statusInterval);el.innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';}
 }
 function toggleAiResult(ev,el,idx){
   if(ev.target.tagName==="INPUT")return;
@@ -2510,8 +2723,8 @@ function renderCompetitors(){
   competitors.forEach((c,i)=>{
     const div=document.createElement("div");div.className="comp-card";
     div.innerHTML='<button class="remove" onclick="removeCompetitor('+i+')">&times;</button>'
-      +'<label>Company Name</label><input type="text" value="'+(c.name||"")+'" onchange="competitors['+i+'].name=this.value" placeholder="Acme Inc">'
-      +'<label>Website URL</label><div style="display:flex;gap:8px"><input type="url" value="'+(c.website||"")+'" id="url'+i+'" onchange="competitors['+i+'].website=this.value" placeholder="https://acme.com" style="flex:1;margin:0"><button class="btn btn-secondary btn-sm" onclick="scanSite('+i+')">Scan</button></div>'
+      +'<label>Company Name</label><input type="text" value="'+esc(c.name||"")+'" onchange="competitors['+i+'].name=this.value" placeholder="Acme Inc">'
+      +'<label>Website URL</label><div style="display:flex;gap:8px"><input type="url" value="'+esc(c.website||"")+'" id="url'+i+'" onchange="competitors['+i+'].website=this.value" placeholder="https://acme.com" style="flex:1;margin:0"><button class="btn btn-secondary btn-sm" onclick="scanSite('+i+')">Scan</button></div>'
       +'<div id="pages'+i+'" class="pages-list">'+(c.pages.length?renderPageCheckboxes(i):'<p class="scanning" style="margin-top:8px;font-style:normal;color:#6b7280">Enter URL and click Scan to discover pages.</p>')+'</div>'
       +'<div class="custom-page"><input type="url" id="custom'+i+'" placeholder="Add custom page URL"><button class="btn btn-secondary btn-sm" onclick="addCustomPage('+i+')">Add</button></div>';
     el.appendChild(div);
@@ -2523,7 +2736,7 @@ function renderPageCheckboxes(idx){
   const c=competitors[idx];if(!c._discovered)return"";
   return c._discovered.map((p,pi)=>{
     const checked=c.pages.find(x=>x.url===p.url)?"checked":"";
-    return '<label><input type="checkbox" '+checked+' onchange="togglePage('+idx+','+pi+',this.checked)"> '+p.label+' <span class="page-url">'+p.url+'</span></label>';
+    return '<label><input type="checkbox" '+checked+' onchange="togglePage('+idx+','+pi+',this.checked)"> '+esc(p.label)+' <span class="page-url">'+esc(p.url)+'</span></label>';
   }).join("");
 }
 function togglePage(ci,pi,on){
@@ -2548,7 +2761,7 @@ async function scanSite(idx){
   if(!u){alert("Enter a URL first.");return;}
   document.getElementById("url"+idx).value=u;
   competitors[idx].website=u;
-  document.getElementById("pages"+idx).innerHTML='<p class="scanning" style="margin-top:8px">Scanning '+u+'...</p>';
+  document.getElementById("pages"+idx).innerHTML='<p class="scanning" style="margin-top:8px">Scanning '+esc(u)+'...</p>';
   try{const r=await fetch("/api/config/discover-pages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:u})});
   const d=await r.json();
   if(d.pages){
@@ -2557,7 +2770,7 @@ async function scanSite(idx){
     if(d.pages.find(p=>p.rss))competitors[idx].blogRss=d.pages.find(p=>p.rss).rss;
     document.getElementById("pages"+idx).innerHTML=renderPageCheckboxes(idx);
   }else{document.getElementById("pages"+idx).innerHTML='<p class="msg msg-err">Could not scan site.</p>';}
-  }catch(e){document.getElementById("pages"+idx).innerHTML='<p class="msg msg-err">'+e.message+'</p>';}
+  }catch(e){document.getElementById("pages"+idx).innerHTML='<p class="msg msg-err">'+esc(e.message)+'</p>';}
 }
 function detectPageType(u){
   try{const p=new URL(u).pathname.toLowerCase();}catch(e){return{type:"general",label:"Custom"};}
@@ -2630,7 +2843,7 @@ async function launch(){
     msgEl.innerHTML='<div class="msg msg-ok">Setup complete! Redirecting to dashboard...</div>';
     setTimeout(()=>{window.location.href="/dashboard";},1500);
   }catch(e){
-    msgEl.innerHTML='<div class="msg msg-err">'+e.message+'</div>';
+    msgEl.innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';
     btn.disabled=false;btn.textContent="Save & Launch First Scan";
   }
 }
@@ -2687,13 +2900,14 @@ textarea{resize:vertical;min-height:60px}
 </div>
 </div>
 <script>
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 async function apply(){
   const body={name:document.getElementById("pName").value,email:document.getElementById("pEmail").value,website:document.getElementById("pWebsite").value,paypalEmail:document.getElementById("pPaypal").value,promotionPlan:document.getElementById("pHow").value};
   if(!body.name||!body.email||!body.paypalEmail){document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">Name, email, and PayPal email are required.</div>';return;}
   try{const r=await fetch("/api/partner/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const d=await r.json();
-  if(d.success)document.getElementById("applyMsg").innerHTML='<div class="msg msg-ok">Application submitted! Your referral code: <strong>'+d.code+'</strong>. We will review and activate your account shortly.</div>';
-  else document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">'+(d.error||"Failed")+'</div>';
-  }catch(e){document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
+  if(d.success)document.getElementById("applyMsg").innerHTML='<div class="msg msg-ok">Application submitted! Your referral code: <strong>'+esc(d.code)+'</strong>. We will review and activate your account shortly.</div>';
+  else document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">'+esc(d.error||"Failed")+'</div>';
+  }catch(e){document.getElementById("applyMsg").innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';}
 }
 </script>
 </body>
@@ -2745,11 +2959,12 @@ th{color:#6b7280;font-weight:600;font-size:11px;text-transform:uppercase;letter-
 <table><thead><tr><th>Email</th><th>Date</th><th>Tier</th><th>Commission</th><th>Status</th></tr></thead><tbody id="refTable"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody></table>
 </div>
 <script>
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML;}
 const params=new URLSearchParams(location.search);
 const code=params.get("code"),email=params.get("email");
 if(!code||!email){document.querySelector(".wrap").innerHTML='<p style="color:#c23030;padding:40px;text-align:center">Missing code or email parameter.</p>';}
 else{fetch("/api/partner/stats?code="+code+"&email="+email).then(r=>r.json()).then(d=>{
-  if(d.error){document.querySelector(".wrap").innerHTML='<p style="color:#c23030;padding:40px;text-align:center">'+d.error+'</p>';return;}
+  if(d.error){document.querySelector(".wrap").innerHTML='<p style="color:#c23030;padding:40px;text-align:center">'+esc(d.error)+'</p>';return;}
   document.getElementById("sReferrals").textContent=d.referralCount||0;
   document.getElementById("sActive").textContent=(d.referrals||[]).filter(r=>r.status==="active").length;
   document.getElementById("sMonthly").textContent="$"+((d.referrals||[]).reduce((s,r)=>s+(r.status==="active"?r.monthlyCommission:0),0)/100).toFixed(2);
@@ -2757,8 +2972,205 @@ else{fetch("/api/partner/stats?code="+code+"&email="+email).then(r=>r.json()).th
   document.getElementById("refLink").value=location.origin+"/?ref="+code;
   const tbody=document.getElementById("refTable");
   if(!d.referrals||d.referrals.length===0){tbody.innerHTML='<tr><td colspan="5" class="empty">No referrals yet</td></tr>';return;}
-  tbody.innerHTML=d.referrals.map(r=>'<tr><td>'+r.email+'</td><td>'+new Date(r.signedUpAt).toLocaleDateString()+'</td><td>'+r.tier+'</td><td>$'+(r.monthlyCommission/100).toFixed(2)+'/mo</td><td>'+r.status+'</td></tr>').join("");
+  tbody.innerHTML=d.referrals.map(r=>'<tr><td>'+esc(r.email)+'</td><td>'+new Date(r.signedUpAt).toLocaleDateString()+'</td><td>'+esc(r.tier)+'</td><td>$'+(r.monthlyCommission/100).toFixed(2)+'/mo</td><td>'+esc(r.status)+'</td></tr>').join("");
 }).catch(()=>{});}
+</script>
+</body>
+</html>`;
+
+// ─── ADMIN LOGIN HTML ────────────────────────────────────────────────────────
+
+const ADMIN_LOGIN_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ScopeHound — Admin Login</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:40px 32px;width:100%;max-width:380px}
+h1{font-size:22px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;text-align:center}
+h1 span{color:#5c6b3c}
+.sub{color:#6b7280;font-size:14px;margin-bottom:24px;text-align:center}
+.error{background:#c2303022;border:1px solid #c23030;color:#c23030;padding:8px 12px;border-radius:2px;font-size:13px;margin-bottom:16px}
+label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:#6b7280;margin-bottom:4px}
+input{width:100%;padding:10px 12px;background:#0a0c0e;border:1px solid #2a3038;border-radius:2px;color:#d4d8de;font-size:14px;margin-bottom:16px}
+input:focus{outline:none;border-color:#5c6b3c}
+.btn{display:block;width:100%;padding:12px;background:#5c6b3c;color:#d4d8de;border:none;border-radius:2px;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer}
+.btn:hover{background:#7a8c52}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Scope<span>Hound</span></h1>
+<p class="sub">Admin Console</p>
+{{ERROR_BLOCK}}
+<form method="POST" action="/admin/login">
+<label for="username">Username</label>
+<input type="text" id="username" name="username" required autocomplete="username">
+<label for="password">Password</label>
+<input type="password" id="password" name="password" required autocomplete="current-password">
+<button type="submit" class="btn">Sign In</button>
+</form>
+</div>
+</body>
+</html>`;
+
+// ─── ADMIN DASHBOARD HTML ────────────────────────────────────────────────────
+
+const ADMIN_DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ScopeHound — Admin Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.5}
+a{color:#7a8c52;text-decoration:none}
+header{background:#12161a;border-bottom:1px solid #2a3038;padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+header h1{font-size:18px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em}
+header h1 span{color:#5c6b3c}
+.admin-badge{font-size:10px;background:#c4a74722;color:#c4a747;border:1px solid #c4a74766;padding:2px 8px;border-radius:2px;text-transform:uppercase;letter-spacing:0.05em;font-weight:700}
+main{max-width:1100px;margin:0 auto;padding:24px}
+h2{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#6b7280;margin:24px 0 12px}
+h2:first-child{margin-top:0}
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.kpi{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:16px}
+.kpi .label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280;margin-bottom:4px}
+.kpi .value{font-size:28px;font-weight:700;color:#d4d8de}
+.kpi .value.green{color:#7a8c52}
+.kpi .value.yellow{color:#c4a747}
+.kpi .value.red{color:#c23030}
+.table-wrap{background:#12161a;border:1px solid #2a3038;border-radius:2px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1a1f25;font-size:13px}
+th{color:#6b7280;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.06em}
+.tier-badge{display:inline-block;font-size:10px;font-weight:700;padding:2px 6px;border-radius:2px;text-transform:uppercase}
+.tier-scout{background:#2a303844;color:#6b7280;border:1px solid #2a3038}
+.tier-operator{background:#5c6b3c22;color:#7a8c52;border:1px solid #5c6b3c66}
+.tier-command{background:#c4a74722;color:#c4a747;border:1px solid #c4a74766}
+.tier-none{background:#c2303022;color:#c23030;border:1px solid #c2303066}
+.status-active{color:#7a8c52}
+.status-canceled{color:#c23030}
+.loading{text-align:center;padding:48px;color:#6b7280}
+.refresh-btn{background:none;border:1px solid #2a3038;color:#6b7280;padding:6px 12px;border-radius:2px;font-size:11px;cursor:pointer;text-transform:uppercase;letter-spacing:0.04em}
+.refresh-btn:hover{border-color:#5c6b3c;color:#d4d8de}
+.utm-table{margin-top:4px}
+.utm-table td:last-child{text-align:right;font-weight:700;color:#d4d8de}
+.utm-table td:first-child{color:#9ca3af}
+</style>
+</head>
+<body>
+<header>
+<div style="display:flex;align-items:center;gap:12px">
+  <h1>Scope<span>Hound</span></h1>
+  <span class="admin-badge">Admin</span>
+</div>
+<div style="display:flex;align-items:center;gap:12px">
+  <button class="refresh-btn" onclick="loadKPIs()">Refresh</button>
+  <a href="/admin/logout" style="font-size:12px;color:#c23030">Sign Out</a>
+</div>
+</header>
+<main>
+<div id="content"><div class="loading">Loading KPIs...</div></div>
+</main>
+<script>
+function esc(s){if(!s)return"";const d=document.createElement("div");d.textContent=s;return d.innerHTML}
+function fmt$(n){return"$"+Number(n).toLocaleString()}
+function timeAgo(d){if(!d)return"never";const s=Math.floor((Date.now()-new Date(d))/1000);if(s<60)return"just now";if(s<3600)return Math.floor(s/60)+"m ago";if(s<86400)return Math.floor(s/3600)+"h ago";return Math.floor(s/86400)+"d ago";}
+
+async function loadKPIs(){
+  document.getElementById("content").innerHTML='<div class="loading">Loading KPIs...</div>';
+  try{
+    const r=await fetch("/api/admin/kpis");
+    if(r.status===401){window.location.href="/admin/login";return;}
+    if(!r.ok)throw new Error("Failed to load");
+    renderDashboard(await r.json());
+  }catch(e){
+    document.getElementById("content").innerHTML='<div class="loading">Failed to load KPIs. '+esc(e.message)+'</div>';
+  }
+}
+
+function kpi(label,value,color){
+  return '<div class="kpi"><div class="label">'+esc(label)+'</div><div class="value'+(color?" "+color:"")+'">'+esc(String(value))+'</div></div>';
+}
+
+function utmTable(entries){
+  if(!entries||entries.length===0)return'<div style="font-size:12px;color:#6b7280;padding:8px 0">No data yet</div>';
+  let h='<div class="table-wrap utm-table"><table><tbody>';
+  for(const[k,v]of entries)h+='<tr><td>'+esc(k)+'</td><td>'+v+'</td></tr>';
+  h+='</tbody></table></div>';
+  return h;
+}
+
+function renderDashboard(d){
+  let h='';
+
+  // ── User Metrics ──
+  h+='<h2>User Metrics</h2><div class="kpi-grid">';
+  h+=kpi("Total Users",d.users.total);
+  h+=kpi("Active Subscribers",d.users.active,"green");
+  h+=kpi("Churned",d.users.churned,"red");
+  h+=kpi("Churn Rate",d.users.churnRate,"yellow");
+  h+='</div>';
+
+  // ── Revenue ──
+  h+='<h2>Revenue</h2><div class="kpi-grid">';
+  h+=kpi("Estimated MRR",fmt$(d.revenue.estimatedMRR),"green");
+  h+=kpi("Estimated ARR",fmt$(d.revenue.estimatedARR),"green");
+  const dist=d.revenue.planDistribution||{};
+  h+=kpi("Scout Plans",dist.scout||0);
+  h+=kpi("Operator Plans",dist.operator||0);
+  h+=kpi("Command Plans",dist.command||0);
+  h+='</div>';
+
+  // ── Engagement ──
+  h+='<h2>Engagement</h2><div class="kpi-grid">';
+  h+=kpi("DAU (Today)",d.engagement.dau);
+  h+=kpi("WAU (7 Days)",d.engagement.wau);
+  h+=kpi("NURR (New User Retention)",d.engagement.nurr,"green");
+  h+=kpi("CURR (Current Retention)",d.engagement.curr,"green");
+  h+='</div>';
+
+  // ── Acquisition ──
+  h+='<h2>Acquisition — Source</h2>';
+  h+=utmTable(d.acquisition.bySource);
+  h+='<h2>Acquisition — Medium</h2>';
+  h+=utmTable(d.acquisition.byMedium);
+  if(d.acquisition.byCampaign&&d.acquisition.byCampaign.length>0){
+    h+='<h2>Acquisition — Campaign</h2>';
+    h+=utmTable(d.acquisition.byCampaign);
+  }
+
+  // ── Users by Tier ──
+  if(d.users.byTier&&Object.keys(d.users.byTier).length>0){
+    h+='<h2>Users by Tier</h2><div class="kpi-grid">';
+    for(const[tier,count]of Object.entries(d.users.byTier)){
+      h+=kpi(tier==="none"?"No Plan":tier.charAt(0).toUpperCase()+tier.slice(1),count);
+    }
+    h+='</div>';
+  }
+
+  // ── Recent Signups ──
+  if(d.users.recentSignups&&d.users.recentSignups.length>0){
+    h+='<h2>Recent Signups (30d)</h2><div class="table-wrap"><table><thead><tr><th>Email</th><th>Tier</th><th>Status</th><th>Source</th><th>Signed Up</th></tr></thead><tbody>';
+    for(const u of d.users.recentSignups){
+      const tc=u.tier?"tier-"+u.tier:"tier-none";
+      const sc=u.status==="active"?"status-active":u.status==="canceled"?"status-canceled":"";
+      h+='<tr><td>'+esc(u.email)+'</td><td><span class="tier-badge '+tc+'">'+(u.tier||"none")+'</span></td><td class="'+sc+'">'+(u.status||"—")+'</td><td>'+(esc(u.source)||"—")+'</td><td>'+timeAgo(u.createdAt)+'</td></tr>';
+    }
+    h+='</tbody></table></div>';
+  }
+
+  // ── Timestamp ──
+  h+='<div style="text-align:center;padding:24px 0;font-size:11px;color:#6b7280">Generated: '+esc(d.generatedAt)+'</div>';
+
+  document.getElementById("content").innerHTML=h;
+}
+
+loadKPIs();
 </script>
 </body>
 </html>`;
@@ -2845,11 +3257,13 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+    const reqOrigin = request.headers.get("Origin");
+    const allowedOrigin = reqOrigin && new URL(reqOrigin).hostname === url.hostname ? reqOrigin : url.origin;
 
     // CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
-        headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,X-Admin-Token" },
+        headers: { "Access-Control-Allow-Origin": allowedOrigin, "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,X-Admin-Token" },
       });
     }
 
@@ -2860,12 +3274,12 @@ export default {
       return new Response("Not Found", { status: 404, headers: { "Cache-Control": "public, max-age=86400" } });
     }
     // Block common vulnerability scanner paths
-    if (/^\/(wp-|wordpress|admin|cgi-bin|phpmyadmin|mysql|cpanel|webmail|autodiscover|remote|telescope|debug|actuator|console|manager|jmx|\.well-known\/security|vendor\/phpunit|_profiler|elmah|trace\.axd|owa\/|ecp\/|exchange|aspnet)/i.test(lp)) {
+    if (/^\/(wp-|wordpress|cgi-bin|phpmyadmin|mysql|cpanel|webmail|autodiscover|remote|telescope|debug|actuator|console|manager|jmx|\.well-known\/security|vendor\/phpunit|_profiler|elmah|trace\.axd|owa\/|ecp\/|exchange|aspnet)/i.test(lp)) {
       return new Response("Not Found", { status: 404, headers: { "Cache-Control": "public, max-age=86400" } });
     }
     // Block single-segment company-name slug probing (e.g. /moonpay, /lenovo)
     // Valid ScopeHound paths all match known prefixes
-    const validPrefixes = ["/", "/signin", "/auth/", "/api/", "/setup", "/dashboard", "/billing", "/partner/", "/privacy", "/support", "/test", "/state", "/history", "/reset", "/run", "/robots.txt"];
+    const validPrefixes = ["/", "/signin", "/auth/", "/api/", "/setup", "/dashboard", "/billing", "/partner/", "/privacy", "/support", "/test", "/state", "/history", "/reset", "/run", "/robots.txt", "/admin"];
     if (path !== "/" && !validPrefixes.some(p => p === "/" ? false : lp.startsWith(p.toLowerCase()))) {
       return new Response("Not Found", { status: 404, headers: { "Cache-Control": "public, max-age=86400" } });
     }
@@ -2873,7 +3287,7 @@ export default {
     // ── robots.txt ──
     if (path === "/robots.txt") {
       return new Response(
-        `User-agent: *\nAllow: /signin\nAllow: /privacy\nAllow: /support\nAllow: /partner/apply\nDisallow: /dashboard\nDisallow: /setup\nDisallow: /billing\nDisallow: /api/\nDisallow: /auth/\nDisallow: /test\nDisallow: /state\nDisallow: /history\nDisallow: /reset\n\nSitemap: https://scopehound.app/sitemap.xml`,
+        `User-agent: *\nAllow: /signin\nAllow: /privacy\nAllow: /support\nAllow: /partner/apply\nDisallow: /dashboard\nDisallow: /setup\nDisallow: /billing\nDisallow: /api/\nDisallow: /auth/\nDisallow: /admin\nDisallow: /test\nDisallow: /state\nDisallow: /history\nDisallow: /reset\n\nSitemap: https://scopehound.app/sitemap.xml`,
         { headers: { "Content-Type": "text/plain", "Cache-Control": "public, max-age=86400" } }
       );
     }
@@ -2904,14 +3318,19 @@ export default {
           if (!comps || comps === "[]") return Response.redirect(url.origin + "/setup", 302);
           return Response.redirect(url.origin + "/dashboard", 302);
         }
-        return new Response(SIGNIN_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+        return htmlResponse(SIGNIN_HTML);
       }
 
       // ── Google OAuth: start ──
       if (path === "/auth/google") {
         const nonce = crypto.randomUUID();
         const ref = url.searchParams.get("ref") || "";
-        const state = JSON.stringify({ nonce, ref });
+        const utm = {
+          source: url.searchParams.get("utm_source") || "",
+          medium: url.searchParams.get("utm_medium") || "",
+          campaign: url.searchParams.get("utm_campaign") || "",
+        };
+        const state = JSON.stringify({ nonce, ref, utm });
         await env.STATE.put("csrf:" + nonce, "1", { expirationTtl: 600 });
         return Response.redirect(getGoogleAuthUrl(env, url.origin, state), 302);
       }
@@ -2930,7 +3349,7 @@ export default {
           if (!tokens || !tokens.access_token) return new Response("Token exchange failed", { status: 400 });
           const profile = await getGoogleUserInfo(tokens.access_token);
           if (!profile || !profile.email) return new Response("Failed to get user info", { status: 400 });
-          const user = await findOrCreateUser(env, "google", profile, state.ref || null);
+          const user = await findOrCreateUser(env, "google", profile, state.ref || null, state.utm || null);
           const token = await createSession(env, user.id);
           // Smart redirect: billing → setup → dashboard
           let dest = "/dashboard";
@@ -3031,7 +3450,10 @@ export default {
         const key = await crypto.subtle.importKey("raw", enc.encode(env.SLACK_SIGNING_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
         const mac = await crypto.subtle.sign("HMAC", key, enc.encode("v0:" + timestamp + ":" + rawBody));
         const expected = "v0=" + Array.from(new Uint8Array(mac)).map(b => b.toString(16).padStart(2, "0")).join("");
-        if (expected !== slackSig) return new Response("Invalid signature", { status: 401 });
+        if (expected.length !== slackSig.length) return new Response("Invalid signature", { status: 401 });
+        let mismatch = 0;
+        for (let i = 0; i < expected.length; i++) mismatch |= expected.charCodeAt(i) ^ slackSig.charCodeAt(i);
+        if (mismatch !== 0) return new Response("Invalid signature", { status: 401 });
 
         const params = new URLSearchParams(rawBody);
         const command = (params.get("command") || "").trim();
@@ -3204,7 +3626,7 @@ export default {
       if (path === "/billing" || path === "/billing/") {
         const user = await getSessionUser(request, env);
         if (!user) return Response.redirect(url.origin + "/signin", 302);
-        return new Response(BILLING_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+        return htmlResponse(BILLING_HTML);
       }
 
       // ── Billing portal ──
@@ -3219,7 +3641,7 @@ export default {
 
       // ── Partner: apply page ──
       if (path === "/partner/apply" || path === "/partner/apply/") {
-        return new Response(PARTNER_APPLY_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+        return htmlResponse(PARTNER_APPLY_HTML);
       }
 
       // ── Partner: submit application ──
@@ -3237,14 +3659,13 @@ export default {
             website: body.website || null,
             paypalEmail: body.paypalEmail,
             promotionPlan: body.promotionPlan || null,
-            status: "approved",
+            status: "pending",
             commissionRate: 0.5,
             commissionMonths: 24,
             referralCount: 0,
             totalEarnings: 0,
             pendingEarnings: 0,
             createdAt: new Date().toISOString(),
-            approvedAt: new Date().toISOString(),
           };
           await Promise.all([
             env.STATE.put("affiliate:" + code, JSON.stringify(affiliate)),
@@ -3258,7 +3679,7 @@ export default {
 
       // ── Partner: dashboard ──
       if (path === "/partner/dashboard" || path === "/partner/dashboard/") {
-        return new Response(PARTNER_DASHBOARD_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+        return htmlResponse(PARTNER_DASHBOARD_HTML);
       }
 
       // ── Partner: stats API ──
@@ -3281,6 +3702,82 @@ export default {
           referrals,
         });
       }
+
+      // ── Partner: admin approve/reject ──
+      if (path === "/api/admin/partner/approve" && request.method === "POST") {
+        const adminSession = await getAdminSession(request, env);
+        const authErr = requireAuth(request, env);
+        if (!adminSession && authErr) return authErr;
+        const body = await request.json();
+        if (!body.code) return jsonResponse({ error: "code required" }, 400);
+        const raw = await env.STATE.get("affiliate:" + body.code);
+        if (!raw) return jsonResponse({ error: "Affiliate not found" }, 404);
+        const affiliate = JSON.parse(raw);
+        affiliate.status = body.reject ? "rejected" : "approved";
+        if (!body.reject) affiliate.approvedAt = new Date().toISOString();
+        await env.STATE.put("affiliate:" + body.code, JSON.stringify(affiliate));
+        return jsonResponse({ success: true, status: affiliate.status });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ADMIN ROUTES — platform operator dashboard (works in both modes)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ── Admin: login page ──
+    if (path === "/admin/login" || path === "/admin/login/") {
+      const adminSession = await getAdminSession(request, env);
+      if (adminSession) return Response.redirect(url.origin + "/admin", 302);
+
+      if (request.method === "POST") {
+        if (!env.ADMIN_USERNAME || !env.ADMIN_PASSWORD_HASH) {
+          return htmlResponse(ADMIN_LOGIN_HTML.replace("{{ERROR_BLOCK}}", '<div class="error">Admin credentials not configured. Set ADMIN_USERNAME and ADMIN_PASSWORD_HASH secrets.</div>'));
+        }
+        const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+        const allowed = await checkAdminLoginRateLimit(env, ip);
+        if (!allowed) {
+          return htmlResponse(ADMIN_LOGIN_HTML.replace("{{ERROR_BLOCK}}", '<div class="error">Too many attempts. Try again in 15 minutes.</div>'));
+        }
+        const formData = await request.formData();
+        const username = formData.get("username") || "";
+        const password = formData.get("password") || "";
+        if (username !== env.ADMIN_USERNAME || !(await verifyAdminPassword(password, env.ADMIN_PASSWORD_HASH.toLowerCase()))) {
+          await recordAdminLoginAttempt(env, ip, false);
+          return htmlResponse(ADMIN_LOGIN_HTML.replace("{{ERROR_BLOCK}}", '<div class="error">Invalid username or password.</div>'));
+        }
+        await recordAdminLoginAttempt(env, ip, true);
+        const token = await createAdminSession(env);
+        if (!token) {
+          return htmlResponse(ADMIN_LOGIN_HTML.replace("{{ERROR_BLOCK}}", '<div class="error">Session signing secret not available. Set JWT_SECRET or ADMIN_TOKEN.</div>'));
+        }
+        const headers = new Headers({ Location: url.origin + "/admin" });
+        setAdminSessionCookie(headers, token);
+        return new Response(null, { status: 302, headers });
+      }
+
+      return htmlResponse(ADMIN_LOGIN_HTML.replace("{{ERROR_BLOCK}}", ""));
+    }
+
+    // ── Admin: logout ──
+    if (path === "/admin/logout") {
+      const headers = new Headers({ Location: url.origin + "/admin/login" });
+      clearAdminSessionCookie(headers);
+      return new Response(null, { status: 302, headers });
+    }
+
+    // ── Admin: dashboard ──
+    if (path === "/admin" || path === "/admin/") {
+      const adminSession = await getAdminSession(request, env);
+      if (!adminSession) return Response.redirect(url.origin + "/admin/login", 302);
+      return htmlResponse(ADMIN_DASHBOARD_HTML);
+    }
+
+    // ── Admin: KPI API ──
+    if (path === "/api/admin/kpis") {
+      const adminSession = await getAdminSession(request, env);
+      if (!adminSession) return jsonResponse({ error: "Admin auth required" }, 401);
+      const kpis = await aggregateKPIs(env);
+      return jsonResponse(kpis);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -3293,9 +3790,9 @@ export default {
         const user = await getSessionUser(request, env);
         if (!user) return Response.redirect(url.origin + "/signin", 302);
         if (user.subscriptionStatus !== "active") return Response.redirect(url.origin + "/billing", 302);
-        return new Response(HOSTED_SETUP_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+        return htmlResponse(HOSTED_SETUP_HTML);
       }
-      return new Response(SETUP_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      return htmlResponse(SETUP_HTML);
     }
 
     // ── Dashboard ──
@@ -3307,7 +3804,7 @@ export default {
         const comps = await env.STATE.get("user_config:" + user.id + ":competitors");
         if (!comps || comps === "[]") return Response.redirect(url.origin + "/setup", 302);
       }
-      return new Response(DASHBOARD_HTML, { headers: { "Content-Type": "text/html;charset=utf-8" } });
+      return htmlResponse(DASHBOARD_HTML);
     }
 
     // ── Dashboard API ──
@@ -3321,7 +3818,7 @@ export default {
       }
       const cache = await env.STATE.get(cacheKey);
       return new Response(cache || '{"competitors":[],"recentChanges":[]}', {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "application/json", ...SECURITY_HEADERS },
       });
     }
 
@@ -3607,8 +4104,10 @@ p{font-size:14px;color:#b0b5bd;margin-bottom:12px}
 </div></body></html>`, { headers: { "Content-Type": "text/html;charset=utf-8" } });
     }
 
-    // ── Manual run ──
+    // ── Manual run (auth required) ──
     if (path === "/test" || path === "/run") {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
       const result = await runMonitor(env);
       const slackOk = result.slackResults.filter(r => r.ok).length;
       const slackErrors = result.slackResults.filter(r => !r.ok).map(r => r.error);
@@ -3618,20 +4117,26 @@ p{font-size:14px;color:#b0b5bd;margin-bottom:12px}
       );
     }
 
-    // ── Raw state ──
+    // ── Raw state (auth required) ──
     if (path === "/state") {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
       const state = await env.STATE.get("monitor_state");
       return new Response(state || "{}", { headers: { "Content-Type": "application/json" } });
     }
 
-    // ── History ──
+    // ── History (auth required) ──
     if (path === "/history") {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
       const history = await env.STATE.get("change_history");
       return new Response(history || "[]", { headers: { "Content-Type": "application/json" } });
     }
 
-    // ── Test Slack (legacy, uses env secret) ──
+    // ── Test Slack (auth required) ──
     if (path === "/test-slack") {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
       const config = await loadConfig(env);
       await sendSlack(config.settings.slackWebhookUrl,
         "ScopeHound v3 is connected!\n\nDashboard: " + url.origin + "/dashboard"
@@ -3639,15 +4144,19 @@ p{font-size:14px;color:#b0b5bd;margin-bottom:12px}
       return jsonResponse({ success: true, message: "Test sent to Slack" });
     }
 
-    // ── Reset all ──
+    // ── Reset all (auth required) ──
     if (path === "/reset") {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
       await env.STATE.delete("monitor_state");
       await env.STATE.delete("dashboard_cache");
       return jsonResponse({ success: true, message: "State reset. Run /test to re-index." });
     }
 
-    // ── Reset pricing ──
+    // ── Reset pricing (auth required) ──
     if (path === "/reset-pricing") {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
       try {
         const config = await loadConfig(env);
         const raw = await env.STATE.get("monitor_state");
