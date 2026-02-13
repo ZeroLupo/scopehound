@@ -1,6 +1,6 @@
 name = "scopehoundv3-worker"
 main = "src/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-02-12"
 
 # Cron trigger - runs daily at 9am UTC
 [triggers]
@@ -14,6 +14,17 @@ id = "5f9d1d2230024aa0a2d49f441ba7ce5c"
 # Workers AI binding (free tier)
 [ai]
 binding = "AI"
+
+# Observability - persist logs to dashboard
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
 
 # ─── SECRETS ────────────────────────────────────────────────────────────────
 # Set via Cloudflare dashboard (Settings → Variables → Secrets) or wrangler CLI.

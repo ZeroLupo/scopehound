@@ -96,10 +96,21 @@ async function hashContent(content) {
   return hashArray.slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Subrequest tracking — Cloudflare Workers free plan allows 50 per invocation.
+// KV ops (get/put/list) also count. Reserve ~15 for KV + Slack + auth overhead.
+let _subrequestCount = 0;
+const SUBREQUEST_LIMIT = 35;
+
+function resetSubrequestCounter() { _subrequestCount = 0; }
+function canSubrequest() { return _subrequestCount < SUBREQUEST_LIMIT; }
+function trackSubrequest() { _subrequestCount++; }
+
 async function fetchUrl(url) {
+  if (!canSubrequest()) { console.log(`  Skipped (subrequest budget: ${_subrequestCount}/${SUBREQUEST_LIMIT})`); return null; }
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
+    trackSubrequest();
     const response = await fetch(url, {
       headers: { "User-Agent": "Scopehound/3.0 (Competitive Intelligence)" },
       signal: controller.signal,
@@ -194,7 +205,7 @@ function computeTextDiff(oldText, newText) {
 // ─── AI FUNCTIONS ────────────────────────────────────────────────────────────
 
 async function extractPricingWithLLM(html, ai) {
-  if (!ai) return null;
+  if (!ai || !canSubrequest()) return null;
   const text = htmlToText(html);
   const prompt = `Extract all pricing information from this webpage text. Return a JSON object with this structure:
 {"plans":[{"name":"Plan Name","price":"$X/mo or $X/year or Custom or Free","features":["key feature 1","key feature 2"]}],"notes":"Any important pricing notes like discounts, trials, etc."}
@@ -203,10 +214,11 @@ Only return valid JSON, no other text.
 Webpage text:
 ${text}`;
   try {
-    const response = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
+    trackSubrequest();
+    const response = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: 1000,
-    });
+    }), 15000);
     const content = response.response;
     if (!content) return null;
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -219,7 +231,7 @@ ${text}`;
 }
 
 async function analyzePageChange(ai, competitorName, pageLabel, pageType, diff) {
-  if (!ai) return null;
+  if (!ai || !canSubrequest()) return null;
   if (diff.changeRatio > 0.8) {
     return {
       summary: "Page significantly redesigned",
@@ -238,10 +250,11 @@ Respond with ONLY valid JSON:
 Priority guide: high = pricing/product changes, major positioning shifts. medium = feature updates, messaging changes. low = minor copy edits.
 Return ONLY the JSON object.`;
   try {
-    const response = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
+    trackSubrequest();
+    const response = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: 500,
-    });
+    }), 15000);
     const content = response.response;
     if (!content) return null;
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -254,7 +267,7 @@ Return ONLY the JSON object.`;
 }
 
 async function classifyAnnouncement(ai, competitorName, postTitle, matchedCategory) {
-  if (!ai) return { category: matchedCategory, priority: "medium", summary: postTitle };
+  if (!ai || !canSubrequest()) return { category: matchedCategory, priority: "medium", summary: postTitle };
   const prompt = `Classify this blog post from competitor "${competitorName}".
 Title: "${postTitle}"
 Detected category: ${matchedCategory}
@@ -262,10 +275,11 @@ Respond with ONLY valid JSON:
 {"category":"funding or partnership or acquisition or event or hiring or product or other","priority":"high or medium or low","summary":"One sentence explanation"}
 Return ONLY the JSON object.`;
   try {
-    const response = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
+    trackSubrequest();
+    const response = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: 200,
-    });
+    }), 15000);
     const content = response.response;
     if (!content) return { category: matchedCategory, priority: "medium", summary: postTitle };
     const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -286,14 +300,22 @@ async function searchDDG(query) {
     if (!r.ok) return [];
     const html = await r.text();
     const results = [];
+    // Extract structured results: title, URL, snippet
+    const resultRegex = /<a class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
     const snippetRegex = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
-    const titleRegex = /<a class="result__a"[^>]*>([\s\S]*?)<\/a>/gi;
+    const titles = [];
+    const urls = [];
+    const snippets = [];
     let m;
-    while ((m = snippetRegex.exec(html)) !== null && results.length < 15) {
-      results.push(m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
+    while ((m = resultRegex.exec(html)) !== null) {
+      urls.push(m[1]);
+      titles.push(m[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
     }
-    while ((m = titleRegex.exec(html)) !== null && results.length < 20) {
-      results.push(m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
+    while ((m = snippetRegex.exec(html)) !== null) {
+      snippets.push(m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
+    }
+    for (let i = 0; i < Math.min(titles.length, 10); i++) {
+      results.push({ title: titles[i] || "", url: urls[i] || "", snippet: snippets[i] || "" });
     }
     return results;
   } catch (e) { console.log(`Search error: ${e.message}`); return []; }
@@ -309,117 +331,204 @@ function extractPageMeta(html) {
   const headings = [];
   const hRegex = /<h[12][^>]*>([\s\S]*?)<\/h[12]>/gi;
   let hMatch;
-  while ((hMatch = hRegex.exec(html)) !== null && headings.length < 4) {
+  while ((hMatch = hRegex.exec(html)) !== null && headings.length < 6) {
     const h = hMatch[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
     if (h.length > 3 && h.length < 200) headings.push(h);
   }
   return { title, metaDesc, ogDesc, headings };
 }
 
-async function discoverCompetitors(ai, companyUrl, seedCompetitors) {
-  const html = await fetchUrl(companyUrl);
-  if (!html) throw new Error("Could not fetch your website");
-  const meta = extractPageMeta(html);
-  const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+function extractBodyText(html) {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 2000);
-  const domain = new URL(companyUrl).hostname.replace(/^www\./, "");
-  const companyName = meta.title.split(/[|\-–—]/)[0].trim() || domain.split(".")[0];
+    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
+    .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, "")
+    .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 3000);
+}
 
-  // Build search queries from the main domain + seed competitors
+const SITE_BLOCKLIST = ["crunchbase.com", "g2.com", "linkedin.com", "twitter.com", "x.com", "facebook.com", "wikipedia.org", "youtube.com", "github.com", "producthunt.com", "trustpilot.com", "capterra.com", "getapp.com", "softwareadvice.com", "reddit.com", "quora.com", "medium.com", "forbes.com", "techcrunch.com"];
+
+async function discoverCompetitors(ai, companyUrl, seedCompetitors) {
+  // ── Step 1: Fetch and extract site content ──
+  const html = await fetchUrl(companyUrl);
+  if (!html) throw new Error("Could not fetch your website. Check the URL and try again.");
+  const meta = extractPageMeta(html);
+  const bodyText = extractBodyText(html);
+  const domain = new URL(companyUrl).hostname.replace(/^www\./, "");
+
+  // Try fetching /pricing or /features for richer context (max 2 extra pages)
+  const extraContent = [];
+  for (const subpath of ["/pricing", "/features"]) {
+    try {
+      const extraHtml = await fetchUrl(`https://${domain}${subpath}`);
+      if (extraHtml && extraHtml.length > 500) {
+        extraContent.push(extractBodyText(extraHtml).slice(0, 1500));
+      }
+    } catch {}
+  }
+
+  const siteContent = [
+    meta.title && `Page title: ${meta.title}`,
+    meta.metaDesc && `Meta description: ${meta.metaDesc}`,
+    meta.ogDesc && meta.ogDesc !== meta.metaDesc && `OG description: ${meta.ogDesc}`,
+    meta.headings.length && `Key headings: ${meta.headings.join(" | ")}`,
+    `\nHomepage content:\n${bodyText}`,
+    ...extraContent.map((c, i) => `\n${i === 0 ? "Pricing" : "Features"} page content:\n${c}`),
+  ].filter(Boolean).join("\n");
+
+  // ── Step 2: LLM call — extract product metadata ──
+  const metadataPrompt = `Analyze the following website content and extract:
+
+1. product_name: The name of the product or service
+2. category: The broad software/service category (e.g. "affiliate marketing platform", "project management tool", "CRM")
+3. subcategory: A more specific niche if applicable
+4. value_props: An array of 3-5 core value propositions, each as a short phrase
+5. target_audience: Who this product is for
+6. keywords: An array of 5-10 keywords/phrases a potential customer might search when looking for this type of tool
+
+Respond in JSON only. No markdown, no preamble.
+
+---
+
+SITE CONTENT:
+${siteContent.slice(0, 4000)}`;
+
+  const metaResponse = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
+    messages: [{ role: "user", content: metadataPrompt }],
+    max_tokens: 800,
+  }), 15000);
+  let productMeta;
+  try {
+    const metaJson = (metaResponse.response || "").match(/\{[\s\S]*\}/);
+    productMeta = metaJson ? JSON.parse(metaJson[0]) : null;
+  } catch { productMeta = null; }
+
+  // Fallback if metadata extraction fails
+  if (!productMeta || !productMeta.product_name) {
+    productMeta = {
+      product_name: meta.title.split(/[|\-–—]/)[0].trim() || domain.split(".")[0],
+      category: "software",
+      subcategory: "",
+      value_props: meta.headings.slice(0, 3),
+      target_audience: "",
+      keywords: [domain.split(".")[0]],
+    };
+  }
+
+  // ── Step 3: Generate search queries from metadata ──
   const seeds = (seedCompetitors || []).filter(Boolean);
   const seedDomains = seeds.map(s => {
     try { return new URL(s.startsWith("http") ? s : "https://" + s).hostname.replace(/^www\./, ""); } catch { return s; }
   });
   const allDomains = [domain, ...seedDomains];
 
-  // Fetch seed competitor homepages for context
-  const seedDescriptions = [];
-  for (const sd of seedDomains.slice(0, 2)) {
-    try {
-      const seedHtml = await fetchUrl("https://" + sd);
-      if (seedHtml) {
-        const sm = extractPageMeta(seedHtml);
-        const desc = sm.metaDesc || sm.ogDesc || sm.title;
-        if (desc) seedDescriptions.push(`${sd}: ${desc}`);
-      }
-    } catch {}
-  }
-
-  // Search for alternatives to each reference point
-  const searchResults = [];
+  // Prioritize value-prop and category queries over branded (domain names confuse search engines)
+  const keywords = productMeta.keywords || [];
   const searchQueries = [
-    `${domain} competitors alternatives`,
-    `${companyName} alternatives`,
+    (productMeta.value_props || []).slice(0, 3).join(" ") + " tool",
+    `best ${productMeta.subcategory || productMeta.category} software ${new Date().getFullYear()}`,
+    keywords.slice(0, 2).join(" ") + " alternatives",
+    `"${productMeta.product_name}" ${productMeta.category} competitors alternatives`,
   ];
-  for (const sd of seedDomains) {
-    const seedName = sd.split(".")[0];
+  // Add seed-based queries
+  for (const sd of seedDomains.slice(0, 2)) {
     searchQueries.push(`${sd} alternatives competitors`);
-    searchQueries.push(`${seedName} vs`);
   }
-  // Run up to 4 searches (main domain + seeds)
+
+  // ── Step 4: Run searches (up to 4 queries) ──
+  const allSearchResults = [];
   for (const q of searchQueries.slice(0, 4)) {
-    const r = await searchDDG(q);
-    searchResults.push(...r);
+    const results = await searchDDG(q);
+    allSearchResults.push(...results);
   }
-  const webContext = searchResults.join("\n").slice(0, 3500);
 
-  const structuredCtx = [
-    meta.title && `Title: ${meta.title}`,
-    meta.metaDesc && `Meta description: ${meta.metaDesc}`,
-    meta.ogDesc && meta.ogDesc !== meta.metaDesc && `OG description: ${meta.ogDesc}`,
-    meta.headings.length && `Key headings: ${meta.headings.join(" | ")}`,
-  ].filter(Boolean).join("\n");
+  // Deduplicate search results by URL domain
+  const seenDomains = new Set();
+  const dedupedResults = allSearchResults.filter(r => {
+    try {
+      const d = new URL(r.url).hostname.replace(/^www\./, "");
+      if (seenDomains.has(d) || SITE_BLOCKLIST.some(b => d.includes(b)) || allDomains.includes(d)) return false;
+      seenDomains.add(d);
+      return true;
+    } catch { return true; } // Keep results without parseable URLs
+  });
 
-  const seedSection = seeds.length > 0
-    ? `\nKnown competitors (provided by user): ${seedDomains.join(", ")}${seedDescriptions.length ? "\n" + seedDescriptions.join("\n") : ""}\nUse these as reference points — find MORE companies like them.\n`
+  // Format search results for LLM
+  const searchContext = dedupedResults.slice(0, 20).map((r, i) =>
+    `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`
+  ).join("\n\n");
+
+  // ── Step 5: LLM call — analyze competitors (using 70B for quality) ──
+  const seedSection = seedDomains.length > 0
+    ? `\nKnown competitors (user-provided): ${seedDomains.join(", ")}\nFind MORE companies like these.\n`
     : "";
 
-  const excludeList = allDomains.map(d => d).join(", ");
+  const analysisPrompt = `You are a competitive intelligence analyst. From the search results below, extract every company/product that competes with ${productMeta.product_name}.
 
-  const prompt = `You are a competitive intelligence analyst. Find direct competitors for this company.
-
-Company domain: ${domain}
-${structuredCtx}
-
-Website text (excerpt):
-${text}
+## Target Product
+- Name: ${productMeta.product_name}
+- Category: ${productMeta.category}
+- What it does: ${productMeta.subcategory || productMeta.category}
+- Value props: ${(productMeta.value_props || []).slice(0, 3).join(", ")}
+- Audience: ${productMeta.target_audience || "not specified"}
 ${seedSection}
-${webContext ? `Web search results about competitors/alternatives:\n${webContext}\n` : ""}
-Respond with ONLY valid JSON in this exact format:
-{"industry":"brief industry description","competitors":[{"name":"Company Name","url":"https://example.com","reason":"one sentence why they compete"}]}
+## Search Results
+${searchContext || "No search results available."}
+
+## Instructions
+List every competing product mentioned in the search results. For each:
+- name: Product name
+- url: Homepage URL (https://)
+- reason: What they do (one sentence)
+- overlap: "direct" (same niche, similar size) | "adjacent" (related) | "broader_platform" (enterprise incumbent)
 
 Rules:
-- List 8-12 competitors, ordered by how directly they compete
-- PRIORITIZE companies mentioned in the web search results — they are real, verified competitors
-- Focus on direct competitors: same problem, same audience, same product category
-- Include startups, niche players, and newer entrants — not just industry giants
-- URLs must be full https:// URLs to the company homepage
-- Do NOT include any of these domains: ${excludeList}
-- Do NOT include generic platforms (CrunchBase, G2, LinkedIn, etc.) — only actual competing products
-- Every result must be a company that a customer would evaluate as an alternative
-Return ONLY the JSON object.`;
-  const response = await ai.run("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [{ role: "user", content: prompt }],
-    max_tokens: 1200,
-  });
-  const content = response.response;
-  if (!content) return { industry: "Unknown", competitors: [] };
+- Extract ALL products from the results — especially smaller/niche tools
+- Enterprise giants (Rakuten, Impact, CJ, ShareASale, Awin) = "broader_platform"
+- Do NOT include: ${allDomains.join(", ")}
+- Do NOT include review sites (G2, Capterra, etc.)
+- Do NOT invent companies not in the results
+- Max 15, direct competitors first
+
+JSON only:
+{"industry":"${productMeta.category}","market_summary":"2-3 sentences","competitors":[{"name":"","url":"","reason":"","overlap":""}]}`;
+
+  const analysisResponse = await withTimeout(ai.run("@cf/meta/llama-3.1-8b-instruct", {
+    messages: [{ role: "user", content: analysisPrompt }],
+    max_tokens: 2000,
+  }), 15000);
+
+  const content = analysisResponse.response;
+  if (!content) return { industry: productMeta.category, competitors: [], market_summary: "" };
+
   const jsonMatch = content.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    const parsed = JSON.parse(jsonMatch[0]);
-    const blocklist = ["crunchbase.com", "g2.com", "linkedin.com", "twitter.com", "facebook.com", "wikipedia.org", "youtube.com", "github.com", "producthunt.com", "trustpilot.com", "capterra.com"];
-    parsed.competitors = (parsed.competitors || []).filter(c => {
-      try {
-        const u = new URL(c.url);
-        if (blocklist.some(b => u.hostname.includes(b))) return false;
-        if (allDomains.includes(u.hostname.replace(/^www\./, ""))) return false;
-        return c.name && c.url;
-      } catch { return false; }
-    });
-    return parsed;
+  if (!jsonMatch) return { industry: productMeta.category, competitors: [], market_summary: "" };
+
+  let parsed;
+  try { parsed = JSON.parse(jsonMatch[0]); } catch {
+    return { industry: productMeta.category, competitors: [], market_summary: "" };
   }
-  return { industry: "Unknown", competitors: [] };
+
+  // Post-process: filter out blocklisted domains, self-references, and invalid URLs
+  parsed.competitors = (parsed.competitors || []).filter(c => {
+    if (!c.name || !c.url) return false;
+    try {
+      const u = new URL(c.url);
+      const d = u.hostname.replace(/^www\./, "");
+      if (SITE_BLOCKLIST.some(b => d.includes(b))) return false;
+      if (allDomains.includes(d)) return false;
+      return true;
+    } catch { return false; }
+  });
+
+  // Ensure the response has the fields the UI expects
+  parsed.industry = parsed.industry || productMeta.category;
+  parsed.market_summary = parsed.market_summary || "";
+  parsed._productMeta = { name: productMeta.product_name, category: productMeta.category, subcategory: productMeta.subcategory };
+
+  return parsed;
 }
 
 // ─── PRICING COMPARISON ─────────────────────────────────────────────────────
@@ -555,15 +664,24 @@ function formatDigestHeader(alerts) {
 // ─── SLACK NOTIFICATION ─────────────────────────────────────────────────────
 
 async function sendSlack(webhookUrl, message) {
-  if (!webhookUrl) { console.log(`[SLACK skip] ${message.slice(0, 80)}`); return; }
+  if (!webhookUrl) { console.log(`[SLACK skip] ${message.slice(0, 80)}`); return { ok: false, error: "no_webhook_url" }; }
   try {
+    trackSubrequest();
     const r = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: message }),
     });
-    if (!r.ok) console.log(`[SLACK ERROR] ${r.status}`);
-  } catch (e) { console.log(`[SLACK ERROR] ${e.message}`); }
+    if (!r.ok) { console.log(`[SLACK ERROR] ${r.status}`); return { ok: false, error: `slack_http_${r.status}` }; }
+    return { ok: true };
+  } catch (e) { console.log(`[SLACK ERROR] ${e.message}`); return { ok: false, error: e.message }; }
+}
+
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout after " + ms + "ms")), ms);
+    promise.then(v => { clearTimeout(timer); resolve(v); }).catch(e => { clearTimeout(timer); reject(e); });
+  });
 }
 
 // ─── PRODUCT HUNT ────────────────────────────────────────────────────────────
@@ -742,6 +860,7 @@ async function migrateState(env, old, competitors, topics, userId) {
 // ─── MAIN MONITORING LOGIC ──────────────────────────────────────────────────
 
 async function runMonitor(env, configOverride, userId) {
+  resetSubrequestCounter();
   const config = configOverride || await loadConfig(env, userId);
   const { competitors, settings } = config;
 
@@ -951,23 +1070,35 @@ async function runMonitor(env, configOverride, userId) {
   await buildDashboardCache(env, state, history, competitors, userId);
   console.log("\nState saved");
 
-  // ── SEND ALERTS ──
+  // ── SEND ALERTS (batched into single Slack message to conserve subrequests) ──
+  const slackResults = [];
+  console.log(`\nSlack URL: ${slackUrl ? "set (" + slackUrl.slice(0, 40) + "...)" : "MISSING"}`);
   if (alerts.length > 0) {
-    console.log(`\nSending ${alerts.length} alert(s) to Slack...`);
-    await sendSlack(slackUrl, formatDigestHeader(alerts));
-    for (const a of alerts.filter((a) => a.priority === "high")) await sendSlack(slackUrl, a.text);
-    for (const a of alerts.filter((a) => a.priority === "medium")) await sendSlack(slackUrl, a.text);
+    console.log(`Sending ${alerts.length} alert(s) to Slack (batched)...`);
+    const parts = [formatDigestHeader(alerts)];
+    const high = alerts.filter((a) => a.priority === "high");
+    const medium = alerts.filter((a) => a.priority === "medium");
     const low = alerts.filter((a) => a.priority === "low");
-    if (low.length > 0) await sendSlack(slackUrl, low.map((a) => a.text).join("\n\n---\n\n"));
+    for (const a of high) parts.push(a.text);
+    for (const a of medium) parts.push(a.text);
+    if (low.length > 0) parts.push(low.map((a) => a.text).join("\n\n---\n\n"));
+    // Slack has a ~40KB message limit; truncate if needed
+    let message = parts.join("\n\n───────────────────\n\n");
+    if (message.length > 38000) message = message.slice(0, 38000) + "\n\n_(message truncated — view full details on your dashboard)_";
+    slackResults.push(await sendSlack(slackUrl, message));
   } else {
     console.log("\nNo changes detected.");
     const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
     const totalPages = competitors.reduce((n, c) => n + (c.pages?.length || 0) + (c.blogRss ? 1 : 0), 0);
-    await sendSlack(slackUrl, `🐺 *ScopeHound Daily Report* — ${date}\n\nScanned ${competitors.length} competitor(s) across ${totalPages} page(s) — no changes detected. All quiet on the competitive front.`);
+    slackResults.push(await sendSlack(slackUrl, `🐺 *ScopeHound Daily Report* — ${date}\n\nScanned ${competitors.length} competitor(s) across ${totalPages} page(s) — no changes detected. All quiet on the competitive front.`));
   }
 
+  const slackOk = slackResults.filter(r => r.ok).length;
+  const slackFail = slackResults.filter(r => !r.ok);
+  console.log(`Slack delivery: ${slackOk}/${slackResults.length} succeeded${slackFail.length ? ", errors: " + slackFail.map(r => r.error).join(", ") : ""}`);
+  console.log(`Subrequests used: ${_subrequestCount}/${SUBREQUEST_LIMIT}`);
   console.log("Done!");
-  return alerts;
+  return { alerts, slackResults, slackUrl: slackUrl ? "set" : "missing", subrequests: _subrequestCount };
 }
 
 // ─── DASHBOARD CACHE ─────────────────────────────────────────────────────────
@@ -1619,7 +1750,7 @@ th{color:#6b7280;font-weight:600;font-size:11px;text-transform:uppercase;letter-
 <body>
 <header>
 <div><h1>Scope<span>Hound</span></h1></div>
-<div class="subtitle" id="lastUpdated">Loading...</div>
+<div style="display:flex;align-items:center;gap:16px"><span class="subtitle" id="lastUpdated">Loading...</span><span id="userBar" style="font-size:12px;color:#6b7280"></span></div>
 </header>
 <nav>
 <button class="active" data-tab="overview">Overview</button>
@@ -1645,6 +1776,7 @@ function renderSeo(){let h='<table><thead><tr><th>Competitor</th><th>Page</th><t
 const tabs={overview:renderOverview,changes:renderChanges,pricing:renderPricing,seo:renderSeo};
 document.querySelectorAll("nav button").forEach(btn=>{btn.addEventListener("click",()=>{document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));btn.classList.add("active");if(DATA)tabs[btn.dataset.tab]();});});
 fetch("./api/dashboard-data").then(r=>r.json()).then(d=>{DATA=d;$("lastUpdated").textContent="Last scan: "+timeAgo(d.generatedAt);renderOverview();}).catch(()=>{content.innerHTML='<div class="empty">Failed to load data. <a href="./setup">Run setup</a> or hit /test first.</div>';});
+fetch("./api/user/profile").then(r=>r.ok?r.json():null).then(u=>{if(u&&u.email){$("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}).catch(()=>{});
 </script>
 </body>
 </html>`;
@@ -1963,7 +2095,7 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 </style>
 </head>
 <body>
-<header><h1>Scope<span>Hound</span></h1><a href="/dashboard">Dashboard</a></header>
+<header><h1>Scope<span>Hound</span></h1><div style="display:flex;align-items:center;gap:16px"><span id="userBar" style="font-size:12px;color:#6b7280"></span><a href="/dashboard" style="font-size:12px">Dashboard</a></div></header>
 <div id="activatingOverlay" style="display:none;position:fixed;inset:0;background:#0a0c0e;z-index:9999;align-items:center;justify-content:center;flex-direction:column">
 <div style="font-size:24px;font-weight:700;color:#d4d8de;margin-bottom:12px">Activating your subscription<span id="loadDots"></span></div>
 <div style="font-size:14px;color:#6b7280;margin-bottom:24px" id="activatingStatus">Confirming payment with Stripe...</div>
@@ -1984,6 +2116,7 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <script>
 async function loadProfile(){
   try{const r=await fetch("/api/user/profile");if(!r.ok)return;const u=await r.json();
+  if(u.email){document.getElementById("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}
   document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"NO PLAN";
   document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"Choose a plan to get started";
   const tier=u.tier;
@@ -2114,7 +2247,7 @@ input:focus{outline:none;border-color:#5c6b3c}
 </style>
 </head>
 <body>
-<header><h1>Scope<span>Hound</span></h1><a href="/billing">Billing</a></header>
+<header><h1>Scope<span>Hound</span></h1><div style="display:flex;align-items:center;gap:16px"><span id="userBar" style="font-size:12px;color:#6b7280"></span><a href="/billing" style="font-size:12px">Billing</a></div></header>
 <div class="wrap">
 <div class="steps">
 <div class="step-tab active" id="tab1">1. Slack</div>
@@ -2129,6 +2262,7 @@ input:focus{outline:none;border-color:#5c6b3c}
 <div id="slackMsg"></div>
 <div id="slackConnected" style="display:none">
 <div class="msg msg-ok" id="slackStatus">Connected to Slack!</div>
+<div style="margin-top:8px"><a href="/auth/slack" style="font-size:12px;color:#6b7280">Change channel or reconnect</a></div>
 </div>
 <div id="slackNotConnected">
 <div style="margin:24px 0;text-align:center">
@@ -2203,7 +2337,8 @@ async function loadUserInfo(){
   const t=u.tier||"recon";const limits={recon:{c:3,p:6},operator:{c:15,p:60},commander:{c:25,p:100},strategic:{c:50,p:200}};
   const l=limits[t]||limits.recon;
   document.getElementById("tierInfo").innerHTML="You can add up to <strong>"+l.c+" competitors</strong> on your "+t.charAt(0).toUpperCase()+t.slice(1)+" plan.";
-  window._tierLimits=l;window._tier=t;}}catch(e){}
+  window._tierLimits=l;window._tier=t;
+  if(u.email){document.getElementById("userBar").innerHTML=u.email+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}}catch(e){}
   // Check if Slack was just connected via OAuth
   if(new URLSearchParams(location.search).get("slack")==="connected"){
     slackVerified=true;
@@ -2267,7 +2402,7 @@ async function findCompetitors(){
   el.innerHTML='<div class="ai-thinking"><div class="ai-brain">Analyzing your website...</div><div class="ai-bar"></div><div class="ai-status">Identifying industry and finding competitors</div></div>';
   // Animate status text
   const seeds=[(document.getElementById("seedComp1")||{}).value,(document.getElementById("seedComp2")||{}).value].filter(s=>s&&s.trim());
-  const statuses=seeds.length>0?["Reading your homepage...","Analyzing your known competitors...","Searching for similar companies...","Cross-referencing alternatives...","Ranking by relevance..."]:["Reading your homepage...","Identifying your industry...","Finding competitors in your space...","Ranking by relevance..."];
+  const statuses=["Reading your homepage...","Checking pricing and features pages...","Extracting product metadata...","Generating search queries...","Searching the web for competitors...","Analyzing and categorizing results...","Ranking by relevance..."];
   let si=0;
   const statusInterval=setInterval(()=>{
     si=(si+1)%statuses.length;
@@ -2281,8 +2416,15 @@ async function findCompetitors(){
     if(d.error){el.innerHTML='<div class="msg msg-err">'+d.error+'</div>';return;}
     aiSuggestions=d.competitors||[];
     if(aiSuggestions.length===0){el.innerHTML='<div class="msg">No competitors found. Try adding them manually below.</div>';return;}
-    let html='<div style="font-size:12px;color:#6b7280;margin:12px 0 8px">Industry: <strong style="color:#7a8c52">'+((d.industry||"").charAt(0).toUpperCase()+(d.industry||"").slice(1))+'</strong> — Select competitors to add:</div>';
-    html+=aiSuggestions.map((c,i)=>'<div class="ai-result" onclick="toggleAiResult(event,this,'+i+')"><input type="checkbox" id="aicheck'+i+'" onchange="onAiCheck('+i+')"><div><div class="ai-name">'+c.name+'</div><div class="ai-url">'+c.url+'</div><div class="ai-reason">'+c.reason+'</div></div></div>').join("");
+    const overlapColors={direct:"#7a8c52",adjacent:"#c9952e",broader_platform:"#6b7280"};
+    const overlapLabels={direct:"Direct",adjacent:"Adjacent",broader_platform:"Broader Platform"};
+    let html='<div style="font-size:12px;color:#6b7280;margin:12px 0 8px">Industry: <strong style="color:#7a8c52">'+((d.industry||"").charAt(0).toUpperCase()+(d.industry||"").slice(1))+'</strong></div>';
+    if(d.market_summary)html+='<div style="font-size:12px;color:#9ca3af;margin:0 0 12px;line-height:1.5">'+d.market_summary+'</div>';
+    html+='<div style="font-size:12px;color:#6b7280;margin:0 0 8px">Select competitors to add:</div>';
+    html+=aiSuggestions.map((c,i)=>{
+      const badge=c.overlap&&overlapLabels[c.overlap]?'<span style="font-size:10px;background:'+overlapColors[c.overlap]+'22;color:'+overlapColors[c.overlap]+';padding:2px 6px;border-radius:4px;margin-left:8px">'+overlapLabels[c.overlap]+'</span>':"";
+      return '<div class="ai-result" onclick="toggleAiResult(event,this,'+i+')"><input type="checkbox" id="aicheck'+i+'" onchange="onAiCheck('+i+')"><div><div class="ai-name">'+c.name+badge+'</div><div class="ai-url">'+c.url+'</div><div class="ai-reason">'+(c.reason||c.description||"")+'</div></div></div>';
+    }).join("");
     html+='<button class="btn btn-primary btn-sm" onclick="addSelectedAi()" style="margin-top:12px" id="addAiBtn" disabled>Add Selected Competitors</button>';
     el.innerHTML=html;
   }catch(e){clearInterval(statusInterval);el.innerHTML='<div class="msg msg-err">'+e.message+'</div>';}
@@ -2600,7 +2742,44 @@ export default {
     if (isHostedMode(env)) {
       ctx.waitUntil((async () => {
         const raw = await env.STATE.get("active_subscribers");
-        const list = raw ? JSON.parse(raw) : [];
+        let list = raw ? JSON.parse(raw) : [];
+
+        // Self-repair: find users with config who aren't in the subscribers list
+        try {
+          const configKeys = await env.STATE.list({ prefix: "user_config:" });
+          const userIdsWithConfig = [...new Set(configKeys.keys.map(k => k.name.split(":")[1]).filter(Boolean))];
+          const missing = userIdsWithConfig.filter(id => !list.includes(id));
+          for (const id of missing) {
+            const uRaw = await env.STATE.get("user:" + id);
+            if (!uRaw) continue;
+            const user = JSON.parse(uRaw);
+            if (user.subscriptionStatus !== "active") continue;
+            list.push(id);
+            console.log(`[self-repair] Re-added ${user.email} to active_subscribers`);
+            // Notify via their Slack
+            const cfg = await loadConfig(env, id);
+            if (cfg.settings.slackWebhookUrl) {
+              await sendSlack(cfg.settings.slackWebhookUrl, "🐺 *ScopeHound Notice*\n\nYour account was missing from the daily scan list and has been automatically repaired. Scans will now run normally.");
+            }
+          }
+          if (missing.length > 0) {
+            await env.STATE.put("active_subscribers", JSON.stringify(list));
+          }
+        } catch (e) {
+          console.log(`[self-repair] Error: ${e.message}`);
+        }
+
+        // Always run global config scan (admin/owner data from self-hosted setup)
+        try {
+          const globalConfig = await loadConfig(env);
+          if (globalConfig.competitors.length > 0) {
+            console.log(`Running global config scan (${globalConfig.competitors.length} competitors)`);
+            await runMonitor(env);
+          }
+        } catch (e) {
+          console.log(`Global scan failed: ${e.message}`);
+        }
+
         for (const userId of list) {
           try {
             const uRaw = await env.STATE.get("user:" + userId);
@@ -3182,8 +3361,16 @@ export default {
       if (response) return response;
       const userId = isHostedMode(env) ? user.id : null;
       const config = await loadConfig(env, userId);
-      const alerts = await runMonitor(env, config, userId);
-      return jsonResponse({ success: true, alertsSent: alerts.length });
+      const result = await runMonitor(env, config, userId);
+      const slackOk = result.slackResults.filter(r => r.ok).length;
+      const slackErrors = result.slackResults.filter(r => !r.ok).map(r => r.error);
+      return jsonResponse({
+        success: true,
+        alertsDetected: result.alerts.length,
+        slackUrl: result.slackUrl,
+        slackMessages: { sent: slackOk, failed: slackErrors.length, errors: slackErrors },
+        subrequests: result.subrequests,
+      });
     }
 
     // ── Config API: Detect RSS ──
@@ -3372,9 +3559,11 @@ p{font-size:14px;color:#b0b5bd;margin-bottom:12px}
 
     // ── Manual run ──
     if (path === "/test" || path === "/run") {
-      const alerts = await runMonitor(env);
+      const result = await runMonitor(env);
+      const slackOk = result.slackResults.filter(r => r.ok).length;
+      const slackErrors = result.slackResults.filter(r => !r.ok).map(r => r.error);
       return new Response(
-        JSON.stringify({ success: true, alertsSent: alerts.length, alerts: alerts.map((a) => a.text || a) }, null, 2),
+        JSON.stringify({ success: true, alertsDetected: result.alerts.length, slackUrl: result.slackUrl, slackMessages: { sent: slackOk, failed: slackErrors.length, errors: slackErrors }, alerts: result.alerts.map((a) => a.text || a) }, null, 2),
         { headers: { "Content-Type": "application/json" } },
       );
     }
