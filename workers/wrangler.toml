@@ -26,6 +26,22 @@ head_sampling_rate = 1
 persist = true
 invocation_logs = true
 
+# ─── STAGING ENVIRONMENT ──────────────────────────────────────────────────
+# Deploy:  npx wrangler deploy --env staging
+# Tail:    npx wrangler tail --env staging
+# Secrets: npx wrangler secret put SECRET_NAME --env staging
+# Uses same KV store as production (safe for read-only testing).
+# Set secrets separately for staging via the commands above.
+[env.staging]
+name = "scopehoundv3-staging"
+[[env.staging.kv_namespaces]]
+binding = "STATE"
+id = "5f9d1d2230024aa0a2d49f441ba7ce5c"
+[env.staging.ai]
+binding = "AI"
+[env.staging.triggers]
+crons = []
+
 # ─── SECRETS ────────────────────────────────────────────────────────────────
 # Set via Cloudflare dashboard (Settings → Variables → Secrets) or wrangler CLI.
 #
