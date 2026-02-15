@@ -114,10 +114,10 @@ async function hashContent(content) {
   return hashArray.slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Subrequest tracking — Cloudflare Workers free plan allows 50 per invocation.
-// KV ops (get/put/list) also count. Reserve ~15 for KV + Slack + auth overhead.
+// Subrequest tracking — Cloudflare Workers paid plan allows 10,000 per invocation.
+// Free plan allows 50. KV ops and Slack also count. Set conservatively below plan limit.
 let _subrequestCount = 0;
-const SUBREQUEST_LIMIT = 35;
+const SUBREQUEST_LIMIT = 500;
 
 function resetSubrequestCounter() { _subrequestCount = 0; }
 function canSubrequest() { return _subrequestCount < SUBREQUEST_LIMIT; }
@@ -238,6 +238,25 @@ function computeTextDiff(oldText, newText) {
 // ─── AI FUNCTIONS ────────────────────────────────────────────────────────────
 
 // Claude API helper — works in Workers without any SDK
+// ─── Workers AI (free, no subrequest cost) — used for daily scan analysis ───
+async function callWorkersAI(env, prompt, { maxTokens = 500 } = {}) {
+  if (!env.AI) return null;
+  try {
+    const result = await env.AI.run("@cf/meta/llama-3.2-3b-instruct", {
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: maxTokens,
+    });
+    const text = result?.response;
+    if (!text) return null;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    return jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+  } catch (error) {
+    console.log(`[Workers AI] ${error.message}`);
+    return null;
+  }
+}
+
+// ─── Claude API (paid, uses subrequest) — used only for competitor discovery ──
 async function callClaude(env, prompt, { model = "claude-haiku-4-5-20251001", maxTokens = 1000, system } = {}) {
   const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey || !canSubrequest()) return null;
@@ -269,10 +288,10 @@ async function callClaude(env, prompt, { model = "claude-haiku-4-5-20251001", ma
 }
 
 async function extractPricingWithLLM(html, env) {
-  if (!env.ANTHROPIC_API_KEY || !canSubrequest()) return null;
+  if (!env.AI) return null;
   const text = htmlToText(html);
   try {
-    return await callClaude(env, `Extract all pricing information from this webpage text. Return a JSON object with this structure:
+    return await callWorkersAI(env, `Extract all pricing information from this webpage text. Return a JSON object with this structure:
 {"plans":[{"name":"Plan Name","price":"$X/mo or $X/year or Custom or Free","features":["key feature 1","key feature 2"]}],"notes":"Any important pricing notes like discounts, trials, etc."}
 If no pricing is found, return {"plans":[],"notes":"No pricing found"}.
 Only return valid JSON, no other text.
@@ -285,7 +304,7 @@ ${text}`);
 }
 
 async function analyzePageChange(env, competitorName, pageLabel, pageType, diff) {
-  if (!env.ANTHROPIC_API_KEY || !canSubrequest()) return null;
+  if (!env.AI) return null;
   if (diff.changeRatio > 0.8) {
     return {
       summary: "Page significantly redesigned",
@@ -295,7 +314,7 @@ async function analyzePageChange(env, competitorName, pageLabel, pageType, diff)
     };
   }
   try {
-    return await callClaude(env, `You are a competitive intelligence analyst. A competitor's web page has changed.
+    return await callWorkersAI(env, `You are a competitive intelligence analyst. A competitor's web page has changed.
 Competitor: ${competitorName}
 Page: ${pageLabel}
 REMOVED content: ${diff.beforeExcerpt || "(none)"}
@@ -311,9 +330,9 @@ Return ONLY the JSON object.`, { maxTokens: 500 });
 }
 
 async function classifyAnnouncement(env, competitorName, postTitle, matchedCategory) {
-  if (!env.ANTHROPIC_API_KEY || !canSubrequest()) return { category: matchedCategory, priority: "medium", summary: postTitle };
+  if (!env.AI) return { category: matchedCategory, priority: "medium", summary: postTitle };
   try {
-    const result = await callClaude(env, `Classify this blog post from competitor "${competitorName}".
+    const result = await callWorkersAI(env, `Classify this blog post from competitor "${competitorName}".
 Title: "${postTitle}"
 Detected category: ${matchedCategory}
 Respond with ONLY valid JSON:
