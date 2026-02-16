@@ -23,27 +23,27 @@ const DEFAULT_ANNOUNCEMENT_KEYWORDS = {
 // ─── TIER DEFINITIONS ────────────────────────────────────────────────────────
 
 const TIERS = {
-  recon:     { name: "Recon",     competitors: 3,  pages: 6,   scansPerDay: 0, historyDays: 30 },
+  scout:     { name: "Scout",     competitors: 3,  pages: 6,   scansPerDay: 0, historyDays: 30 },
   operator:  { name: "Operator",  competitors: 15, pages: 60,  scansPerDay: 2, historyDays: 365 },
-  strategic: { name: "Strategic", competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
-  // Legacy aliases (existing user records may still reference old tier names)
-  scout:     { name: "Recon",     competitors: 3,  pages: 6,   scansPerDay: 0, historyDays: 30 },
-  command:   { name: "Strategic", competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
+  command:   { name: "Command",   competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
+  // Legacy aliases (pre-migration user records may still reference old tier names)
+  recon:     { name: "Scout",     competitors: 3,  pages: 6,   scansPerDay: 0, historyDays: 30 },
+  strategic: { name: "Command",   competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
 };
 
 const FEATURE_GATES = {
-  ai_discovery:       ["operator", "strategic", "command"],
-  seed_discovery:     ["operator", "strategic", "command"],
-  slash_scan:         ["operator", "strategic", "command"],
-  slash_ads:          ["operator", "strategic", "command"],
-  rss_monitoring:     ["operator", "strategic", "command"],
-  scheduled_scans:    ["operator", "strategic", "command"],
-  competitor_radar:   ["strategic", "command"],
-  priority_scan_queue: ["strategic", "command"],
+  ai_discovery:       ["operator", "command", "strategic"],
+  seed_discovery:     ["operator", "command", "strategic"],
+  slash_scan:         ["operator", "command", "strategic"],
+  slash_ads:          ["operator", "command", "strategic"],
+  rss_monitoring:     ["operator", "command", "strategic"],
+  scheduled_scans:    ["operator", "command", "strategic"],
+  competitor_radar:   ["command", "strategic"],
+  priority_scan_queue: ["command", "strategic"],
 };
 
 function getTierLimits(tier) {
-  return TIERS[tier] || TIERS.recon;
+  return TIERS[tier] || TIERS.scout;
 }
 
 function hasFeature(tier, feature) {
@@ -913,7 +913,7 @@ async function runMonitor(env, configOverride, userId) {
   if (userId) {
     try {
       const uRaw = await env.STATE.get("user:" + userId);
-      if (uRaw) userTier = JSON.parse(uRaw).tier || "recon";
+      if (uRaw) userTier = JSON.parse(uRaw).tier || "scout";
     } catch {}
   }
 
@@ -1182,7 +1182,7 @@ async function buildDashboardCache(env, state, history, competitors, userId) {
 // ─── ADMIN KPI AGGREGATION ───────────────────────────────────────────────────
 
 async function aggregateKPIs(env) {
-  const TIER_PRICES = { recon: 0, operator: 49, strategic: 99, scout: 0, command: 99 };
+  const TIER_PRICES = { scout: 29, operator: 79, command: 199, recon: 29, strategic: 199 };
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
   const sevenDaysAgo = new Date(now - 7 * 86400000);
@@ -1457,7 +1457,7 @@ async function resolveAuth(request, env) {
   }
   const authErr = requireAuth(request, env);
   if (authErr) return { user: null, response: authErr };
-  return { user: { id: "admin", tier: "strategic", email: "admin" }, response: null };
+  return { user: { id: "admin", tier: "command", email: "admin" }, response: null };
 }
 
 // ─── JWT SESSION MANAGEMENT ─────────────────────────────────────────────────
@@ -1776,7 +1776,7 @@ async function handleStripeWebhook(event, env) {
       // Record affiliate commission on first payment
       const affCode = session.metadata?.affiliate_code || user.referredBy;
       if (affCode) {
-        const tierPrices = { recon: 0, operator: 4900, strategic: 9900, scout: 0, command: 9900 };
+        const tierPrices = { scout: 2900, operator: 7900, command: 19900, recon: 2900, strategic: 19900 };
         await recordAffiliateCommission(env, affCode, userId, tierPrices[tier] || 0, tier);
       }
       processed = true;
@@ -1854,7 +1854,7 @@ async function handleStripeWebhook(event, env) {
 // ─── TIER ENFORCEMENT ───────────────────────────────────────────────────────
 
 function enforceTierLimits(user, competitors) {
-  const limits = getTierLimits(user?.tier || "recon");
+  const limits = getTierLimits(user?.tier || "scout");
   if (competitors.length > limits.competitors) {
     return { error: `Your ${limits.name} plan allows ${limits.competitors} competitors. Upgrade at /billing.` };
   }
@@ -2354,11 +2354,11 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <div id="successMsg"></div>
 <div class="current" id="currentPlan"><div><div class="current-plan" id="planName">Loading...</div><div class="current-status" id="planStatus"></div></div></div>
 <h2>Plans</h2>
-<div style="text-align:center;margin-bottom:16px"><span id="toggleLabel" style="font-size:12px;color:#6b7280">Monthly</span><label style="display:inline-block;vertical-align:middle;margin:0 8px;width:40px;height:22px;position:relative;cursor:pointer"><input type="checkbox" id="billingToggle" style="display:none" onchange="toggleBilling()"><span style="position:absolute;inset:0;background:#2a3038;border-radius:11px;transition:0.3s"></span><span id="toggleDot" style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#d4d8de;border-radius:50%;transition:0.3s"></span></label><span style="font-size:12px;color:#6b7280">Annual <span style="color:#5c6b3c;font-weight:700">Save 17%</span></span></div>
+<div style="text-align:center;margin-bottom:16px"><label style="display:inline-block;vertical-align:middle;margin:0 8px;width:40px;height:22px;position:relative;cursor:pointer"><input type="checkbox" id="billingToggle" style="display:none" onchange="toggleBilling()"><span style="position:absolute;inset:0;background:#2a3038;border-radius:11px;transition:0.3s"></span><span id="toggleDot" style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#d4d8de;border-radius:50%;transition:0.3s"></span></label><span style="font-size:12px;color:#6b7280">Annual <span style="color:#5c6b3c;font-weight:700">Save 17%</span></span></div>
 <div class="grid" style="grid-template-columns:repeat(3,1fr)">
-<div class="plan" data-tier="recon"><div class="plan-name">Recon</div><div class="plan-price" data-monthly="0" data-annual="0">$0<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Manual scans only</li><li>30-day history</li><li>Dashboard + Slack alerts</li></ul><button class="btn btn-primary" id="btn-recon" onclick="checkout('recon')">Free</button></div>
-<div class="plan" data-tier="operator" style="border-color:#5c6b3c;position:relative"><div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#5c6b3c;color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;padding:2px 10px;border-radius:2px">Recommended</div><div class="plan-name">Operator</div><div class="plan-price" data-monthly="49" data-annual="490">$49<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>2x daily scans</li><li>1-year history</li><li>AI competitor discovery</li><li>RSS/blog monitoring</li><li>/scan + /ads commands</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Subscribe</button></div>
-<div class="plan" data-tier="strategic"><div class="plan-name">Strategic</div><div class="plan-price" data-monthly="99" data-annual="990">$99<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>4x daily scans</li><li>Unlimited history</li><li>Everything in Operator</li><li>Priority scan queue</li><li>Competitor Radar (soon)</li></ul><button class="btn btn-primary" id="btn-strategic" onclick="checkout('strategic')">Subscribe</button></div>
+<div class="plan" data-tier="scout"><div class="plan-name">Scout</div><div class="plan-price" data-monthly="29" data-annual="290">$29<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Manual scans only</li><li>30-day history</li><li>Dashboard + Slack alerts</li></ul><button class="btn btn-primary" id="btn-scout" onclick="checkout('scout')">Subscribe</button></div>
+<div class="plan" data-tier="operator" style="border-color:#5c6b3c;position:relative"><div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#5c6b3c;color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;padding:2px 10px;border-radius:2px">Recommended</div><div class="plan-name">Operator</div><div class="plan-price" data-monthly="79" data-annual="790">$79<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>2x daily scans</li><li>1-year history</li><li>AI competitor discovery</li><li>RSS/blog monitoring</li><li>/scan + /ads commands</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Subscribe</button></div>
+<div class="plan" data-tier="command"><div class="plan-name">Command</div><div class="plan-price" data-monthly="199" data-annual="1990">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>4x daily scans</li><li>Unlimited history</li><li>Everything in Operator</li><li>Priority scan queue</li><li>Competitor Radar (soon)</li></ul><button class="btn btn-primary" id="btn-command" onclick="checkout('command')">Subscribe</button></div>
 </div>
 <div class="manage" id="manageSection" style="display:none"><a href="#" onclick="manageSubscription();return false">Manage subscription on Stripe</a></div>
 </div>
@@ -2382,7 +2382,7 @@ async function loadProfile(){
   document.getElementById("planName").textContent=u.tier?u.tier.toUpperCase()+" PLAN":"NO PLAN";
   document.getElementById("planStatus").textContent=u.subscriptionStatus==="active"?"Active":u.subscriptionStatus||"Choose a plan to get started";
   const tier=u.tier;
-  const tierOrder=["recon","operator","strategic","scout","command"];
+  const tierOrder=["scout","recon","operator","command","strategic"];
   document.querySelectorAll(".plan").forEach(p=>{const t=p.dataset.tier;const btn=p.querySelector("button");
   if(!tier){btn.textContent="Subscribe";btn.className="btn btn-primary";btn.onclick=function(){checkout(t);};}
   else if(t===tier){p.classList.add("active");btn.className="btn btn-current";btn.textContent="Current Plan";btn.onclick=null;}
@@ -2597,12 +2597,12 @@ function esc(s){const d=document.createElement("div");d.textContent=s;return d.i
 let currentStep=1,slackVerified=false,slackSkipped=false,competitors=[];
 async function loadUserInfo(){
   try{const r=await fetch("/api/user/profile");if(r.ok){const u=await r.json();
-  const t=u.tier||"recon";const limits={recon:{c:3,p:6},scout:{c:3,p:6},operator:{c:15,p:60},strategic:{c:50,p:200},command:{c:50,p:200}};
-  const l=limits[t]||limits.recon;
+  const t=u.tier||"scout";const limits={scout:{c:3,p:6},recon:{c:3,p:6},operator:{c:15,p:60},command:{c:50,p:200},strategic:{c:50,p:200}};
+  const l=limits[t]||limits.scout;
   document.getElementById("tierInfo").innerHTML="You can add up to <strong>"+l.c+" competitors</strong> on your "+t.charAt(0).toUpperCase()+t.slice(1)+" plan.";
   window._tierLimits=l;window._tier=t;
-  // Hide AI discovery for Recon (not available on their plan)
-  if(t==="recon"||t==="scout"){const ai=document.getElementById("aiDiscover");if(ai){ai.innerHTML='<div style="padding:16px;text-align:center"><p style="font-size:13px;color:#6b7280;margin-bottom:8px">AI competitor discovery is available on the Operator plan.</p><a href="/billing" style="font-size:12px">Upgrade to unlock</a></div>';}}
+  // Hide AI discovery for Scout (not available on their plan)
+  if(t==="scout"||t==="recon"){const ai=document.getElementById("aiDiscover");if(ai){ai.innerHTML='<div style="padding:16px;text-align:center"><p style="font-size:13px;color:#6b7280;margin-bottom:8px">AI competitor discovery is available on the Operator plan.</p><a href="/billing" style="font-size:12px">Upgrade to unlock</a></div>';}}
   if(u.email){document.getElementById("userBar").innerHTML=esc(u.email)+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}}catch(e){}
   // Check if Slack was just connected via OAuth
   if(new URLSearchParams(location.search).get("slack")==="connected"){
@@ -2826,7 +2826,7 @@ function renderReview(){
     '<div class="review-item"><span class="review-label">Slack</span><span>Connected</span></div>'
     +'<div class="review-item"><span class="review-label">Competitors</span><span>'+ready.length+'</span></div>'
     +'<div class="review-item"><span class="review-label">Pages monitored</span><span>'+totalPages+'</span></div>'
-    +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"recon").charAt(0).toUpperCase()+(window._tier||"recon").slice(1)+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"scout").charAt(0).toUpperCase()+(window._tier||"scout").slice(1)+'</span></div>'
     +'<div class="review-item"><span class="review-label">Schedule</span><span>Daily at 9am UTC</span></div>';
 }
 function scanProgress(steps){
@@ -3073,9 +3073,9 @@ table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1a1f25;font-size:13px}
 th{color:#6b7280;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.06em}
 .tier-badge{display:inline-block;font-size:10px;font-weight:700;padding:2px 6px;border-radius:2px;text-transform:uppercase}
-.tier-recon,.tier-scout{background:#2a303844;color:#6b7280;border:1px solid #2a3038}
+.tier-scout,.tier-recon{background:#2a303844;color:#6b7280;border:1px solid #2a3038}
 .tier-operator{background:#5c6b3c22;color:#7a8c52;border:1px solid #5c6b3c66}
-.tier-strategic,.tier-command{background:#c4a74722;color:#c4a747;border:1px solid #c4a74766}
+.tier-command,.tier-strategic{background:#c4a74722;color:#c4a747;border:1px solid #c4a74766}
 .tier-none{background:#c2303022;color:#c23030;border:1px solid #c2303066}
 .status-active{color:#7a8c52}
 .status-canceled{color:#c23030}
@@ -3254,9 +3254,9 @@ export default {
             if (!uRaw) continue;
             const user = JSON.parse(uRaw);
             if (user.subscriptionStatus !== "active") continue;
-            const tier = user.tier || "recon";
+            const tier = user.tier || "scout";
 
-            // Recon: no scheduled scans (manual only)
+            // Scout: no scheduled scans (manual only)
             if (!hasFeature(tier, "scheduled_scans")) {
               console.log(`Skipping ${user.email} (${tier}) — manual scans only`);
               continue;
@@ -3554,7 +3554,7 @@ export default {
         if (text.startsWith("add ")) {
           let compUrl = text.slice(4).trim();
           if (!/^https?:\/\//i.test(compUrl)) compUrl = "https://" + compUrl;
-          const limits = getTierLimits(user.tier || "recon");
+          const limits = getTierLimits(user.tier || "scout");
           if (comps.length >= limits.competitors) {
             return jsonResponse({ response_type: "ephemeral", text: `You've reached your ${limits.name} plan limit of ${limits.competitors} competitors. Upgrade at worker.scopehound.app/billing` });
           }
@@ -3824,7 +3824,7 @@ export default {
           const uRaw = await env.STATE.get("user:" + userId);
           if (!uRaw) return jsonResponse({ error: "User not found" }, 404);
           const user = JSON.parse(uRaw);
-          const tier = user.tier || "recon";
+          const tier = user.tier || "scout";
           const cfg = await loadConfig(env, userId);
           const info = {
             userId, email: user.email, tier,
@@ -3850,7 +3850,7 @@ export default {
           const uRaw = await env.STATE.get("user:" + uid);
           if (!uRaw) { results.push({ userId: uid, status: "not_found" }); continue; }
           const user = JSON.parse(uRaw);
-          const tier = user.tier || "recon";
+          const tier = user.tier || "scout";
           const cfg = await loadConfig(env, uid);
           const info = {
             userId: uid, email: user.email, tier,
@@ -3890,6 +3890,38 @@ export default {
         return htmlResponse(HOSTED_SETUP_HTML);
       }
       return htmlResponse(SETUP_HTML);
+    }
+
+    // ── Admin: Migrate tier names (one-time: recon→scout, strategic→command) ──
+    if (path === "/api/admin/migrate-tiers" && request.method === "POST") {
+      const adminSession = await getAdminSession(request, env);
+      const authErr = requireAuth(request, env);
+      if (!adminSession && authErr) return authErr;
+      const dryRun = url.searchParams.get("dry_run") === "true";
+      const tierMap = { recon: "scout", strategic: "command" };
+      const results = [];
+      let cursor = null;
+      do {
+        const list = await env.STATE.list({ prefix: "user:", cursor });
+        for (const key of list.keys) {
+          const raw = await env.STATE.get(key.name);
+          if (!raw) continue;
+          try {
+            const user = JSON.parse(raw);
+            const oldTier = user.tier;
+            const newTier = tierMap[oldTier];
+            if (newTier) {
+              if (!dryRun) {
+                user.tier = newTier;
+                await env.STATE.put(key.name, JSON.stringify(user));
+              }
+              results.push({ key: key.name, email: user.email, from: oldTier, to: newTier, migrated: !dryRun });
+            }
+          } catch {}
+        }
+        cursor = list.list_complete ? null : list.cursor;
+      } while (cursor);
+      return jsonResponse({ dryRun, migrated: results.length, results });
     }
 
     // ── Dashboard ──
@@ -4032,7 +4064,7 @@ export default {
     if (path === "/api/config/discover-competitors" && request.method === "POST") {
       const { user, response } = await resolveAuth(request, env);
       if (response) return response;
-      if (!hasFeature(user.tier || "recon", "ai_discovery")) {
+      if (!hasFeature(user.tier || "scout", "ai_discovery")) {
         return jsonResponse({ error: "AI competitor discovery is available on the Operator plan. Upgrade to let ScopeHound automatically find and track your competitors." }, 403);
       }
       try {

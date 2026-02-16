@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About — ScopeHound</title>
+  <meta name="description" content="ScopeHound was built because competitive intelligence shouldn't cost a fortune or live in a silo. Open source, Slack-native, diner economics.">
+  <meta property="og:title" content="About — ScopeHound">
+  <meta property="og:description" content="Built because competitive intel shouldn't cost a fortune or live in a silo.">
+  <meta property="og:image" content="../scopehound_logo.png">
+  <meta property="og:type" content="website">
+  <link rel="icon" type="image/png" href="../scopehound_logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* ===== DESIGN TOKENS (from landing page) ===== */
+    :root {
+      --bg: #0a0c0e;
+      --bg-panel: #12161a;
+      --bg-elevated: #1a1f25;
+      --border: #2a3038;
+      --text: #d4d8de;
+      --text-muted: #6b7280;
+      --olive: #5c6b3c;
+      --olive-light: #7a8c52;
+      --tan: #c4a747;
+      --red: #c23030;
+      --green: #3d6b35;
+      --font-mono: "SF Mono", "Fira Code", "Cascadia Code", "JetBrains Mono", monospace;
+      --max-width: 1120px;
+      --section-gap: 96px;
+    }
+
+    /* ===== RESET ===== */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.7;
+    }
+
+    .container {
+      max-width: var(--max-width);
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* ===== NAV (matches landing page) ===== */
+    .nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 1000;
+      background: rgba(10, 12, 14, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      height: 56px;
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 56px;
+    }
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .nav-shield {
+      width: 44px; height: 44px;
+      position: relative;
+    }
+    .nav-shield img {
+      width: 100%; height: 100%;
+      object-fit: contain;
+    }
+    .nav-wordmark {
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 32px;
+      list-style: none;
+    }
+    .nav-links a {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      transition: color 0.2s ease;
+    }
+    .nav-links a:hover { color: var(--text); }
+    .nav-links a.active { color: var(--olive-light); }
+    .nav-mobile-toggle {
+      display: none;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+    }
+    .nav-mobile-toggle span {
+      display: block;
+      width: 20px; height: 2px;
+      background: var(--text);
+      margin: 4px 0;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+    .btn { border-radius: 2px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; font-size: 11px; }
+    .btn-primary { background: var(--olive); color: var(--text); }
+    .btn-primary:hover { background: var(--olive-light); }
+    .btn-secondary { border: 1px solid var(--border); color: var(--text-muted); }
+    .btn-secondary:hover { border-color: var(--olive); color: var(--text); }
+
+    /* ===== SECTION LABEL ===== */
+    .section-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 32px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .section-label::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .highlight { color: var(--olive-light); }
+
+    /* ===== HERO ===== */
+    .about-hero {
+      padding: 120px 24px 80px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    .about-hero h1 {
+      font-family: var(--font-mono);
+      font-size: clamp(26px, 4vw, 40px);
+      font-weight: 700;
+      line-height: 1.25;
+      text-transform: uppercase;
+      letter-spacing: -0.5px;
+      margin-bottom: 24px;
+      color: var(--text);
+    }
+    .about-hero .hero-subtitle {
+      font-size: 17px;
+      color: var(--text-muted);
+      max-width: 640px;
+      line-height: 1.8;
+    }
+
+    /* ===== ORIGIN ===== */
+    .origin {
+      padding: 0 24px 80px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    .origin-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      margin-top: 40px;
+    }
+    .origin-text p {
+      color: var(--text-muted);
+      font-size: 15px;
+      margin-bottom: 20px;
+      line-height: 1.8;
+    }
+    .origin-text p strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .origin-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 36px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .origin-card .quote {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--text);
+      margin-bottom: 20px;
+      padding-left: 20px;
+      border-left: 2px solid var(--olive);
+    }
+    .origin-card .attribution {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* ===== VALUES STRIP ===== */
+    .values-strip {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 48px;
+    }
+    .value-item {
+      background: var(--bg-panel);
+      padding: 32px 28px;
+    }
+    .value-item .value-num {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--olive-light);
+      letter-spacing: 2px;
+      margin-bottom: 12px;
+    }
+    .value-item h3 {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+    .value-item p {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+
+    /* ===== FOUNDER ===== */
+    .founder {
+      padding: 0 24px 80px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    .founder-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 48px;
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      gap: 48px;
+      align-items: start;
+      margin-top: 40px;
+    }
+    .founder-photo {
+      width: 200px; height: 240px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+    .founder-photo .initials {
+      font-family: var(--font-mono);
+      font-size: 40px;
+      font-weight: 700;
+      color: var(--olive);
+      letter-spacing: 2px;
+    }
+    .founder-photo::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--olive);
+    }
+    .founder-info h3 {
+      font-family: var(--font-mono);
+      font-size: 18px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .founder-role {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--olive-light);
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 20px;
+    }
+    .founder-bio p {
+      font-size: 14px;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      line-height: 1.8;
+    }
+    .career-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 24px;
+    }
+    .career-tag {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 5px 12px;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text-muted);
+      background: var(--bg-elevated);
+    }
+    .career-tag.highlight-tag {
+      border-color: var(--olive);
+      color: var(--olive-light);
+      background: rgba(92, 107, 60, 0.12);
+    }
+
+    /* ===== PHILOSOPHY ===== */
+    .philosophy {
+      padding: 0 24px 80px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    .philosophy-block {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 48px;
+      margin-top: 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    .philosophy-block::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--olive), transparent);
+    }
+    .philosophy-block h2 {
+      font-family: var(--font-mono);
+      font-size: 20px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      margin-bottom: 24px;
+      line-height: 1.4;
+    }
+    .philosophy-block > p {
+      font-size: 15px;
+      color: var(--text-muted);
+      line-height: 1.8;
+      margin-bottom: 16px;
+      max-width: 640px;
+    }
+    .philosophy-principles {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-top: 32px;
+    }
+    .principle {
+      padding: 20px 0;
+      border-top: 1px solid var(--border);
+    }
+    .principle h4 {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .principle p {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+
+    /* ===== CTA ===== */
+    .cta-section {
+      padding: 80px 24px;
+      max-width: 960px;
+      margin: 0 auto;
+      text-align: center;
+    }
+    .cta-section h2 {
+      font-family: var(--font-mono);
+      font-size: 24px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      margin-bottom: 16px;
+    }
+    .cta-section > p {
+      color: var(--text-muted);
+      font-size: 15px;
+      margin-bottom: 32px;
+    }
+    .cta-buttons {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+    }
+    .cta-buttons a {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 14px 28px;
+      border-radius: 2px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .cta-btn-primary {
+      background: var(--olive);
+      color: var(--text);
+    }
+    .cta-btn-primary:hover { background: var(--olive-light); }
+    .cta-btn-secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .cta-btn-secondary:hover { border-color: var(--olive); }
+
+    /* ===== FOOTER (matches landing page) ===== */
+    .footer {
+      padding: 48px 0;
+      margin-top: var(--section-gap);
+      border-top: 1px solid var(--border);
+    }
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .footer-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+    .footer-brand {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+    .footer-link {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      transition: color 0.2s ease;
+    }
+    .footer-link:hover { color: var(--text); }
+    .footer-tagline {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    /* ===== ANIMATIONS ===== */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .about-hero, .origin, .founder, .philosophy, .cta-section {
+      animation: fadeUp 0.6s ease-out both;
+    }
+    .origin { animation-delay: 0.1s; }
+    .founder { animation-delay: 0.15s; }
+    .philosophy { animation-delay: 0.2s; }
+
+    /* ===== RESPONSIVE ===== */
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .nav-mobile-toggle { display: block; }
+      .nav-links.open {
+        display: flex;
+        flex-direction: column;
+        position: absolute;
+        top: 56px; left: 0; right: 0;
+        background: var(--bg);
+        border-bottom: 1px solid var(--border);
+        padding: 16px 24px;
+        gap: 16px;
+      }
+      .about-hero { padding: 88px 24px 60px; }
+      .origin-grid { grid-template-columns: 1fr; }
+      .founder-card { grid-template-columns: 1fr; justify-items: center; }
+      .values-strip { grid-template-columns: 1fr; }
+      .philosophy-principles { grid-template-columns: 1fr; }
+      .cta-buttons { flex-direction: column; align-items: center; }
+      .footer { padding: 32px 0; }
+      .footer-inner { flex-direction: column; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ============ NAV ============ -->
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-brand">
+        <div class="nav-shield">
+          <img src="../scopehound_logo.png" alt="ScopeHound">
+        </div>
+        <span class="nav-wordmark">ScopeHound</span>
+      </a>
+      <button class="nav-mobile-toggle" id="navToggle" aria-label="Toggle navigation">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+      <ul class="nav-links" id="navLinks">
+        <li><a href="/#capabilities">Features</a></li>
+        <li><a href="/#operations">How It Works</a></li>
+        <li><a href="/#pricing">Pricing</a></li>
+        <li><a href="https://github.com/ZeroLupo/scopehound" class="btn btn-secondary" style="padding:8px 18px;">Self-Host</a></li>
+        <li><a href="/about" class="active">About</a></li>
+        <li><a href="https://worker.scopehound.app/signin" class="btn btn-primary" style="padding:8px 18px;color:#c5a747;">Get Started</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- ============ HERO ============ -->
+  <section class="about-hero">
+    <div class="section-label">About</div>
+    <h1>Built because <span class="highlight">competitive intel</span> shouldn't cost a fortune or live in a silo.</h1>
+    <p class="hero-subtitle">
+      ScopeHound was born at a startup where everyone needed to know what competitors were doing, but nobody had time to check. So we put the intel where the team already lived: Slack.
+    </p>
+  </section>
+
+  <!-- ============ ORIGIN ============ -->
+  <section class="origin">
+    <div class="section-label">The Origin</div>
+    <div class="origin-grid">
+      <div class="origin-text">
+        <p>
+          <strong>ScopeHound started as an internal tool.</strong> While building Alfie.io, an AI-powered affiliate marketing platform, we realized we were spending hours manually checking competitor websites for pricing changes, new features, blog posts, and Product Hunt launches.
+        </p>
+        <p>
+          The enterprise tools that did this cost thousands per month and locked insights inside dashboards nobody checked. We needed something leaner: automated monitoring that delivered analyzed intel directly into Slack, where decisions actually happen.
+        </p>
+        <p>
+          So we built it. Then we open-sourced it, because every startup deserves access to competitive intelligence, not just the ones with enterprise budgets.
+        </p>
+      </div>
+      <div class="origin-card">
+        <div class="quote">
+          "We didn't need a Michelin-star intelligence platform. We needed a diner that serves reliable intel, fast, at a price that makes sense."
+        </div>
+        <div class="attribution">The philosophy behind ScopeHound</div>
+      </div>
+    </div>
+
+    <div class="values-strip">
+      <div class="value-item">
+        <div class="value-num">01</div>
+        <h3>Open Source First</h3>
+        <p>Self-host for free. Inspect the code. Contribute. No vendor lock-in, no black boxes.</p>
+      </div>
+      <div class="value-item">
+        <div class="value-num">02</div>
+        <h3>Slack-Native</h3>
+        <p>Intel delivered where your team works. No new dashboard to check, no new login to forget.</p>
+      </div>
+      <div class="value-item">
+        <div class="value-num">03</div>
+        <h3>Diner Economics</h3>
+        <p>Sustainable pricing, honest features. We charge for the value we deliver, not the budget you have.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FOUNDER ============ -->
+  <section class="founder">
+    <div class="section-label">Founder</div>
+    <div class="founder-card">
+      <div class="founder-photo">
+        <span class="initials">MO</span>
+      </div>
+      <div class="founder-info">
+        <h3>Matthew O'Brien</h3>
+        <div class="founder-role">Founder &amp; Builder</div>
+        <div class="founder-bio">
+          <p>
+            15+ years in growth, product marketing, and GTM across gaming, ecommerce, and subscription businesses. Most recently Director of Product Marketing at Chess.com / Chessable, where he scaled revenue from $3.7M to $18M and grew registrations by 148%.
+          </p>
+          <p>
+            Previously VP of Growth &amp; Marketing at Play Magnus Group, leading user acquisition and brand strategy across 10 products for the world's second-largest chess company. Before tech, he co-founded Oxytocina Tattoo in Barcelona, bootstrapping it to profitability and top local rankings.
+          </p>
+          <p>
+            Matthew builds tools he wishes existed. ScopeHound is one of them. Alfie.io is the other.
+          </p>
+        </div>
+        <div class="career-tags">
+          <span class="career-tag highlight-tag">Alfie.io</span>
+          <span class="career-tag highlight-tag">ScopeHound</span>
+          <span class="career-tag">Chess.com</span>
+          <span class="career-tag">Play Magnus</span>
+          <span class="career-tag">Go to Market</span>
+          <span class="career-tag">User Acquisition</span>
+          <span class="career-tag">Attribution</span>
+          <span class="career-tag">Reforge</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PHILOSOPHY ============ -->
+  <section class="philosophy">
+    <div class="section-label">How We Build</div>
+    <div class="philosophy-block">
+      <h2>A <span class="highlight">diner</span>, not a Michelin star.</h2>
+      <p>
+        We believe competitive intelligence should be accessible, actionable, and affordable. That means making deliberate tradeoffs: we prioritize reliability over polish, and utility over feature bloat.
+      </p>
+      <div class="philosophy-principles">
+        <div class="principle">
+          <h4>Ship What Matters</h4>
+          <p>Every feature earns its place. If it doesn't make your competitive awareness better, it doesn't ship.</p>
+        </div>
+        <div class="principle">
+          <h4>Transparency Over Trust</h4>
+          <p>Open-source core. Public roadmap. You can see exactly what you're running and why.</p>
+        </div>
+        <div class="principle">
+          <h4>Sustainable by Design</h4>
+          <p>Unit economics that work at every tier. We're building a business that lasts, not one that burns.</p>
+        </div>
+        <div class="principle">
+          <h4>Team-First Delivery</h4>
+          <p>Intel locked in a dashboard is wasted intel. Everything we build starts with "how does this reach the team?"</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CTA ============ -->
+  <section class="cta-section">
+    <div class="section-label">Get Started</div>
+    <h2>Start Watching Your Competitors.</h2>
+    <p>Open source. $0 to self-host. Managed plans from $29/mo.</p>
+    <div class="cta-buttons">
+      <a href="https://worker.scopehound.app/signin" class="cta-btn-primary">Get Started</a>
+      <a href="/#field-report" class="cta-btn-secondary">View Live Demo</a>
+    </div>
+  </section>
+
+  <!-- ============ FOOTER ============ -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-links">
+        <span class="footer-brand">ScopeHound</span>
+        <a href="https://github.com/ZeroLupo/scopehound" class="footer-link">GitHub</a>
+        <a href="#" class="footer-link">Docs</a>
+        <a href="#" class="footer-link">MIT License</a>
+      </div>
+      <div class="footer-tagline">Built for operators who refuse to be blindsided.</div>
+    </div>
+  </footer>
+
+  <script>
+    document.getElementById("navToggle").addEventListener("click", function() {
+      document.getElementById("navLinks").classList.toggle("open");
+    });
+  </script>
+
+</body>
+</html>
