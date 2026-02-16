@@ -9,7 +9,9 @@
   <meta property="og:description" content="Built because competitive intel shouldn't cost a fortune or live in a silo.">
   <meta property="og:image" content="../scopehound_logo.png">
   <meta property="og:type" content="website">
-  <link rel="icon" type="image/png" href="../scopehound_logo.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="../favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="../favicon-16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="../apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -276,6 +278,10 @@
       justify-content: center;
       overflow: hidden;
       position: relative;
+    }
+    .founder-photo img {
+      width: 100%; height: 100%;
+      object-fit: cover;
     }
     .founder-photo .initials {
       font-family: var(--font-mono);
@@ -608,7 +614,7 @@
     <div class="section-label">Founder</div>
     <div class="founder-card">
       <div class="founder-photo">
-        <span class="initials">MO</span>
+        <img src="founder.png" alt="Matthew O'Brien">
       </div>
       <div class="founder-info">
         <h3>Matthew O'Brien</h3>
