@@ -407,6 +407,102 @@
       line-height: 1.7;
     }
 
+    /* ===== CONTACT ===== */
+    .contact {
+      padding: 0 24px 80px;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+    .contact-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 48px;
+      margin-top: 40px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+    }
+    .contact-intro h2 {
+      font-family: var(--font-mono);
+      font-size: 20px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      margin-bottom: 16px;
+      line-height: 1.4;
+    }
+    .contact-intro p {
+      font-size: 14px;
+      color: var(--text-muted);
+      line-height: 1.8;
+    }
+    .contact-form { display: flex; flex-direction: column; gap: 16px; }
+    .contact-form label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .contact-form input,
+    .contact-form textarea {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 14px;
+      padding: 10px 14px;
+      transition: border-color 0.2s;
+    }
+    .contact-form input:focus,
+    .contact-form textarea:focus {
+      outline: none;
+      border-color: var(--olive);
+    }
+    .contact-form textarea { resize: vertical; min-height: 100px; }
+    .contact-submit {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: var(--olive);
+      color: var(--text);
+      border: none;
+      border-radius: 2px;
+      padding: 14px 28px;
+      cursor: pointer;
+      transition: background 0.2s;
+      align-self: flex-start;
+    }
+    .contact-submit:hover { background: var(--olive-light); }
+    .contact-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+    .contact-success {
+      background: rgba(61, 107, 53, 0.15);
+      border: 1px solid var(--green);
+      border-radius: 2px;
+      padding: 12px 16px;
+      color: var(--olive-light);
+      font-size: 13px;
+      display: none;
+    }
+    .contact-error {
+      background: rgba(194, 48, 48, 0.15);
+      border: 1px solid var(--red);
+      border-radius: 2px;
+      padding: 12px 16px;
+      color: #e05050;
+      font-size: 13px;
+      display: none;
+    }
+
     /* ===== CTA ===== */
     .cta-section {
       padding: 80px 24px;
@@ -499,7 +595,7 @@
       from { opacity: 0; transform: translateY(20px); }
       to { opacity: 1; transform: translateY(0); }
     }
-    .about-hero, .origin, .founder, .philosophy, .cta-section {
+    .about-hero, .origin, .founder, .philosophy, .contact, .cta-section {
       animation: fadeUp 0.6s ease-out both;
     }
     .origin { animation-delay: 0.1s; }
@@ -525,6 +621,7 @@
       .founder-card { grid-template-columns: 1fr; justify-items: center; }
       .values-strip { grid-template-columns: 1fr; }
       .philosophy-principles { grid-template-columns: 1fr; }
+      .contact-card { grid-template-columns: 1fr; }
       .cta-buttons { flex-direction: column; align-items: center; }
       .footer { padding: 32px 0; }
       .footer-inner { flex-direction: column; text-align: center; }
@@ -573,7 +670,7 @@
     <div class="origin-grid">
       <div class="origin-text">
         <p>
-          <strong>ScopeHound started as an internal tool.</strong> While building Alfie.io, an AI-powered affiliate marketing platform, we realized we were spending hours manually checking competitor websites for pricing changes, new features, blog posts, and Product Hunt launches.
+          <strong>ScopeHound started as an internal tool.</strong> While building <a href="https://alfie.io" target="_blank" style="color:var(--olive-light);text-decoration:underline;text-underline-offset:2px;">Alfie.io</a>, an AI-powered affiliate marketing platform, we realized we were spending hours manually checking competitor websites, Reddit threads, Product Hunt launches, and Hacker News posts for pricing changes, new features, and market moves.
         </p>
         <p>
           The enterprise tools that did this cost thousands per month and locked insights inside dashboards nobody checked. We needed something leaner: automated monitoring that delivered analyzed intel directly into Slack, where decisions actually happen.
@@ -627,7 +724,7 @@
             Previously VP of Growth &amp; Marketing at Play Magnus Group, leading user acquisition and brand strategy across 10 products for the world's second-largest chess company. Before tech, he co-founded Oxytocina Tattoo in Barcelona, bootstrapping it to profitability and top local rankings.
           </p>
           <p>
-            Matthew builds tools he wishes existed. ScopeHound is one of them. Alfie.io is the other.
+            Matthew builds tools he wishes existed at <a href="https://mattymakes.cool" target="_blank" style="color:var(--olive-light);text-decoration:underline;text-underline-offset:2px;">mattymakes.cool</a>.
           </p>
         </div>
         <div class="career-tags">
@@ -673,6 +770,36 @@
     </div>
   </section>
 
+  <!-- ============ CONTACT ============ -->
+  <section class="contact">
+    <div class="section-label">Contact</div>
+    <div class="contact-card">
+      <div class="contact-intro">
+        <h2>Get in <span class="highlight">touch</span></h2>
+        <p>
+          Questions about ScopeHound, partnership ideas, or just want to say hello? Drop a message and I'll get back to you.
+        </p>
+      </div>
+      <form class="contact-form" id="contactForm">
+        <label>
+          Name
+          <input type="text" name="name" required placeholder="Your name">
+        </label>
+        <label>
+          Email
+          <input type="email" name="email" required placeholder="you@company.com">
+        </label>
+        <label>
+          Message
+          <textarea name="message" required placeholder="What's on your mind?"></textarea>
+        </label>
+        <div class="contact-success" id="contactSuccess">Message sent. I'll be in touch soon.</div>
+        <div class="contact-error" id="contactError"></div>
+        <button type="submit" class="contact-submit" id="contactBtn">Send Message</button>
+      </form>
+    </div>
+  </section>
+
   <!-- ============ CTA ============ -->
   <section class="cta-section">
     <div class="section-label">Get Started</div>
@@ -700,6 +827,35 @@
   <script>
     document.getElementById("navToggle").addEventListener("click", function() {
       document.getElementById("navLinks").classList.toggle("open");
+    });
+
+    document.getElementById("contactForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const btn = document.getElementById("contactBtn");
+      const success = document.getElementById("contactSuccess");
+      const error = document.getElementById("contactError");
+      success.style.display = "none";
+      error.style.display = "none";
+      btn.disabled = true;
+      btn.textContent = "Sending...";
+      try {
+        const fd = new FormData(this);
+        const body = { name: fd.get("name"), email: fd.get("email"), message: fd.get("message") };
+        const r = await fetch("https://worker.scopehound.app/api/contact", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || "Failed to send"); }
+        success.style.display = "block";
+        this.reset();
+      } catch (err) {
+        error.textContent = err.message || "Something went wrong. Please try again.";
+        error.style.display = "block";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Send Message";
+      }
     });
   </script>
 

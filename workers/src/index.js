@@ -65,10 +65,11 @@ async function loadConfig(env, userId) {
     competitors,
     settings: {
       slackWebhookUrl: settings.slackWebhookUrl || env.SLACK_WEBHOOK_URL || null,
-      productHuntToken: settings.productHuntToken || env.PRODUCTHUNT_TOKEN || null,
       productHuntTopics: settings.productHuntTopics || [],
       announcementKeywords: settings.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS,
       phMinVotes: settings.phMinVotes ?? 0,
+      radarSubreddits: settings.radarSubreddits || [],
+      _productMeta: settings._productMeta || null,
     },
   };
 }
@@ -114,13 +115,14 @@ async function hashContent(content) {
   return hashArray.slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Subrequest tracking — Cloudflare Workers paid plan allows 10,000 per invocation.
-// Free plan allows 50. KV ops and Slack also count. Set conservatively below plan limit.
+// Subrequest tracking — Cloudflare Workers Standard plan allows 1000 per invocation.
+// Reserve slots for Slack delivery at the end of each scan.
 let _subrequestCount = 0;
-const SUBREQUEST_LIMIT = 500;
+const SUBREQUEST_LIMIT = 1000;
+const SLACK_RESERVED = 5;
 
 function resetSubrequestCounter() { _subrequestCount = 0; }
-function canSubrequest() { return _subrequestCount < SUBREQUEST_LIMIT; }
+function canSubrequest() { return _subrequestCount < (SUBREQUEST_LIMIT - SLACK_RESERVED); }
 function trackSubrequest() { _subrequestCount++; }
 
 // SSRF protection — block private/reserved IPs and non-HTTP schemes
@@ -144,10 +146,26 @@ async function fetchUrl(url) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
     trackSubrequest();
-    const response = await fetch(url, {
+    let response = await fetch(url, {
       headers: { "User-Agent": "Scopehound/3.0 (Competitive Intelligence)" },
       signal: controller.signal,
+      redirect: "manual",
     });
+    // Follow at most 1 redirect (saves subrequests vs automatic redirect chains)
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const loc = response.headers.get("location");
+      if (loc && canSubrequest()) {
+        const redirectUrl = loc.startsWith("http") ? loc : new URL(loc, url).href;
+        if (isUrlSafe(redirectUrl)) {
+          trackSubrequest();
+          response = await fetch(redirectUrl, {
+            headers: { "User-Agent": "Scopehound/3.0 (Competitive Intelligence)" },
+            signal: controller.signal,
+            redirect: "manual",
+          });
+        }
+      }
+    }
     clearTimeout(timeoutId);
     if (!response.ok) {
       console.log(`  Fetch error ${url}: ${response.status}`);
@@ -321,7 +339,8 @@ REMOVED content: ${diff.beforeExcerpt || "(none)"}
 ADDED content: ${diff.afterExcerpt || "(none)"}
 Respond with ONLY valid JSON:
 {"summary":"One sentence: what specifically changed","analysis":"2-3 sentences: why this matters competitively","priority":"high or medium or low","recommendation":"One sentence: what action to take"}
-Priority guide: high = pricing/product changes, major positioning shifts. medium = feature updates, messaging changes. low = minor copy edits.
+Priority guide: high = pricing/product changes, major positioning shifts. medium = feature updates, messaging changes. low = minor copy edits, date changes, trivial updates.
+IMPORTANT: Focus on what ACTUALLY changed in the content above. If the removed/added content is trivial (dates, timestamps, minor formatting), set priority to "low" and keep analysis brief. Do NOT speculate about what a lack of changes might mean.
 Return ONLY the JSON object.`, { maxTokens: 500 });
   } catch (error) {
     console.log(`  AI analysis error: ${error.message}`);
@@ -347,13 +366,15 @@ Return ONLY the JSON object.`, { maxTokens: 200 });
 // ─── AI COMPETITOR DISCOVERY ────────────────────────────────────────────────
 
 async function searchDDG(query) {
+  if (!canSubrequest()) return [];
+  // Try DuckDuckGo HTML with browser-like UA
   try {
+    trackSubrequest();
     const r = await fetch("https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query), {
-      headers: { "User-Agent": "Scopehound/3.0 (Competitive Intelligence)" },
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" },
     });
-    if (!r.ok) return [];
+    if (!r.ok) { console.log(`[Search] DDG HTTP ${r.status}`); return []; }
     const html = await r.text();
-    const results = [];
     // Extract structured results: title, URL, snippet
     const resultRegex = /<a class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
     const snippetRegex = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -368,11 +389,48 @@ async function searchDDG(query) {
     while ((m = snippetRegex.exec(html)) !== null) {
       snippets.push(m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim());
     }
-    for (let i = 0; i < Math.min(titles.length, 10); i++) {
-      results.push({ title: titles[i] || "", url: urls[i] || "", snippet: snippets[i] || "" });
+    if (titles.length > 0) {
+      const results = [];
+      for (let i = 0; i < Math.min(titles.length, 10); i++) {
+        results.push({ title: titles[i] || "", url: urls[i] || "", snippet: snippets[i] || "" });
+      }
+      return results;
     }
+    console.log(`[Search] DDG returned HTML but 0 results (likely blocked), trying DuckDuckGo lite...`);
+  } catch (e) { console.log(`[Search] DDG error: ${e.message}`); }
+
+  // Fallback: DuckDuckGo lite endpoint
+  if (!canSubrequest()) return [];
+  try {
+    trackSubrequest();
+    const r = await fetch("https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query), {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" },
+    });
+    if (!r.ok) return [];
+    const html = await r.text();
+    const results = [];
+    // Lite format uses table rows with class "result-link" or simple <a> tags
+    const linkRegex = /<a[^>]*class="result-link"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let lm;
+    while ((lm = linkRegex.exec(html)) !== null && results.length < 10) {
+      results.push({ title: lm[2].replace(/<[^>]+>/g, "").trim(), url: lm[1], snippet: "" });
+    }
+    // Also try extracting from td.result-snippet
+    if (results.length === 0) {
+      // Broader extraction: any link that looks like a result
+      const broadRegex = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+      const seen = new Set();
+      while ((lm = broadRegex.exec(html)) !== null && results.length < 10) {
+        const url = lm[1];
+        const title = lm[2].replace(/<[^>]+>/g, "").trim();
+        if (url.includes("duckduckgo.com") || !title || title.length < 5 || seen.has(url)) continue;
+        seen.add(url);
+        results.push({ title, url, snippet: "" });
+      }
+    }
+    console.log(`[Search] DDG lite: ${results.length} results`);
     return results;
-  } catch (e) { console.log(`Search error: ${e.message}`); return []; }
+  } catch (e) { console.log(`[Search] DDG lite error: ${e.message}`); return []; }
 }
 
 function extractPageMeta(html) {
@@ -402,7 +460,11 @@ function extractBodyText(html) {
     .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 3000);
 }
 
+// Sites that should never be added as competitors (profile/social/review sites)
 const SITE_BLOCKLIST = ["crunchbase.com", "g2.com", "linkedin.com", "twitter.com", "x.com", "facebook.com", "wikipedia.org", "youtube.com", "github.com", "producthunt.com", "trustpilot.com", "capterra.com", "getapp.com", "softwareadvice.com", "reddit.com", "quora.com", "medium.com", "forbes.com", "techcrunch.com"];
+// Subset: sites with NO useful competitor mentions in search snippets (filter from search results)
+// Reddit, Product Hunt, Medium, listicle sites are KEPT — they mention competitor names Claude can extract
+const SEARCH_FILTER = ["linkedin.com", "twitter.com", "x.com", "facebook.com", "wikipedia.org", "youtube.com", "github.com", "trustpilot.com"];
 
 async function discoverCompetitors(env, companyUrl, seedCompetitors) {
   // ── Step 1: Fetch and extract site content ──
@@ -452,7 +514,8 @@ ${siteContent.slice(0, 4000)}`;
   let productMeta;
   try {
     productMeta = await callClaude(env, metadataPrompt, { maxTokens: 800 });
-  } catch { productMeta = null; }
+    console.log(`[Discovery] Step 2 metadata: ${productMeta ? "ok" : "null (API key missing or call failed)"}`);
+  } catch (e) { console.log(`[Discovery] Step 2 error: ${e.message}`); productMeta = null; }
 
   // Fallback if metadata extraction fails
   if (!productMeta || !productMeta.product_name) {
@@ -473,23 +536,26 @@ ${siteContent.slice(0, 4000)}`;
   });
   const allDomains = [domain, ...seedDomains];
 
-  // Prioritize value-prop and category queries over branded (domain names confuse search engines)
+  // Prioritize value-prop and category queries, plus Reddit/PH/listicle sources
   const keywords = productMeta.keywords || [];
   const searchQueries = [
-    (productMeta.value_props || []).slice(0, 3).join(" ") + " tool",
     `best ${productMeta.subcategory || productMeta.category} software ${new Date().getFullYear()}`,
-    keywords.slice(0, 2).join(" ") + " alternatives",
+    (productMeta.value_props || []).slice(0, 3).join(" ") + " tool",
     `"${productMeta.product_name}" ${productMeta.category} competitors alternatives`,
+    `site:reddit.com ${productMeta.subcategory || productMeta.category} tools recommendations`,
+    `site:producthunt.com ${productMeta.subcategory || productMeta.category}`,
+    keywords.slice(0, 2).join(" ") + " alternatives",
   ];
   // Add seed-based queries
   for (const sd of seedDomains.slice(0, 2)) {
     searchQueries.push(`${sd} alternatives competitors`);
   }
 
-  // ── Step 4: Run searches (up to 4 queries) ──
+  // ── Step 4: Run searches (up to 6 queries) ──
   const allSearchResults = [];
-  for (const q of searchQueries.slice(0, 4)) {
+  for (const q of searchQueries.slice(0, 6)) {
     const results = await searchDDG(q);
+    console.log(`[Discovery] Step 4 search "${q.slice(0, 60)}": ${results.length} results`);
     allSearchResults.push(...results);
   }
 
@@ -498,59 +564,124 @@ ${siteContent.slice(0, 4000)}`;
   const dedupedResults = allSearchResults.filter(r => {
     try {
       const d = new URL(r.url).hostname.replace(/^www\./, "");
-      if (seenDomains.has(d) || SITE_BLOCKLIST.some(b => d.includes(b)) || allDomains.includes(d)) return false;
+      if (seenDomains.has(d) || SEARCH_FILTER.some(b => d.includes(b)) || allDomains.includes(d)) return false;
       seenDomains.add(d);
       return true;
     } catch { return true; } // Keep results without parseable URLs
   });
+
+  console.log(`[Discovery] Step 4 total: ${allSearchResults.length} raw, ${dedupedResults.length} deduped`);
 
   // Format search results for LLM
   const searchContext = dedupedResults.slice(0, 20).map((r, i) =>
     `${i + 1}. ${r.title}\n   URL: ${r.url}\n   ${r.snippet}`
   ).join("\n\n");
 
-  // ── Step 5: LLM call — analyze competitors (using 70B for quality) ──
+  // ── Step 5: LLM call — analyze competitors ──
   const seedSection = seedDomains.length > 0
     ? `\nKnown competitors (user-provided): ${seedDomains.join(", ")}\nFind MORE companies like these.\n`
     : "";
 
-  const analysisPrompt = `You are a competitive intelligence analyst. From the search results below, extract every company/product that competes with ${productMeta.product_name}.
+  const hasSearchResults = dedupedResults.length > 0;
+
+  // Build a detailed product fingerprint for better matching
+  const productFingerprint = `
+- Name: ${productMeta.product_name}
+- Domain: ${domain}
+- Category: ${productMeta.category}
+- Specific niche: ${productMeta.subcategory || productMeta.category}
+- Core capabilities: ${(productMeta.value_props || []).join("; ")}
+- Target customer: ${productMeta.target_audience || "not specified"}
+- Keywords: ${(productMeta.keywords || []).join(", ")}`;
+
+  const matchScoreInstructions = `
+## Match Scoring (CRITICAL)
+For each competitor, calculate a match_score from 0-100 based on these weighted dimensions:
+- Same core use case / job-to-be-done (40 points): Do they solve the exact same problem?
+- Same target customer (25 points): Do they sell to the same buyer persona / company size?
+- Similar business model (15 points): SaaS vs marketplace vs agency, pricing range, self-serve vs enterprise
+- Feature overlap (10 points): Do they have similar feature sets?
+- Similar company stage/size (10 points): Startup vs growth vs enterprise incumbent
+
+A direct niche competitor solving the same problem for the same customer = 80-95%.
+A broader platform that includes this as a sub-feature = 30-50%.
+An adjacent tool in a related space = 40-65%.
+
+Sort the results by match_score descending (highest match first).`;
+
+  const analysisPrompt = hasSearchResults
+    ? `You are a competitive intelligence analyst. From the search results below, extract every company/product that competes with the target product.
 
 ## Target Product
-- Name: ${productMeta.product_name}
-- Category: ${productMeta.category}
-- What it does: ${productMeta.subcategory || productMeta.category}
-- Value props: ${(productMeta.value_props || []).slice(0, 3).join(", ")}
-- Audience: ${productMeta.target_audience || "not specified"}
+${productFingerprint}
 ${seedSection}
+${matchScoreInstructions}
+
 ## Search Results
-${searchContext || "No search results available."}
+${searchContext}
 
 ## Instructions
 List every competing product mentioned in the search results. For each:
 - name: Product name
 - url: Homepage URL (https://)
-- reason: What they do (one sentence)
-- overlap: "direct" (same niche, similar size) | "adjacent" (related) | "broader_platform" (enterprise incumbent)
+- reason: What they do and why they compete (one sentence)
+- overlap: "direct" | "adjacent" | "broader_platform"
+- match_score: 0-100 (see scoring above)
 
 Rules:
 - Extract ALL products from the results — especially smaller/niche tools
-- Enterprise giants (Rakuten, Impact, CJ, ShareASale, Awin) = "broader_platform"
+- Enterprise giants = "broader_platform", usually match_score 30-50
 - Do NOT include: ${allDomains.join(", ")}
 - Do NOT include review sites (G2, Capterra, etc.)
 - Do NOT invent companies not in the results
-- Max 15, direct competitors first
+- Max 15, sorted by match_score descending
 
 JSON only:
-{"industry":"${productMeta.category}","market_summary":"2-3 sentences","competitors":[{"name":"","url":"","reason":"","overlap":""}]}`;
+{"industry":"${productMeta.category}","market_summary":"2-3 sentences","competitors":[{"name":"","url":"","reason":"","overlap":"","match_score":0}]}`
+    : `You are a competitive intelligence analyst. Based on your knowledge, identify the top competitors for this product.
+
+## Target Product
+${productFingerprint}
+${seedSection}
+## Website Content (excerpt)
+${siteContent.slice(0, 2000)}
+
+${matchScoreInstructions}
+
+## Instructions
+Identify the top competitors based on your knowledge. Think step by step:
+1. What is the SPECIFIC job-to-be-done this product solves? (not the broad category)
+2. Who are the small, niche startups solving that exact same problem?
+3. Who are the adjacent tools that overlap significantly?
+4. Who are the broader platforms that include this as a feature?
+
+For each competitor provide:
+- name: Product name
+- url: Homepage URL (https://) — use the real URL you know
+- reason: What they do and specifically why they compete with this product (one sentence)
+- overlap: "direct" | "adjacent" | "broader_platform"
+- match_score: 0-100 (see scoring above)
+
+Rules:
+- Only include REAL companies with REAL URLs — do not make up companies or URLs
+- Start with the closest niche competitors (match_score 80+), then work outward
+- Prioritize startups and indie tools that solve the EXACT same problem over big platforms
+- Think about AI-native tools, newer entrants, and bootstrapped competitors
+- Do NOT include: ${allDomains.join(", ")}
+- Max 15, sorted by match_score descending
+
+JSON only:
+{"industry":"${productMeta.category}","market_summary":"2-3 sentences about this competitive landscape","competitors":[{"name":"","url":"","reason":"","overlap":"","match_score":0}]}`;
 
   let parsed;
   try {
     parsed = await callClaude(env, analysisPrompt, { model: "claude-sonnet-4-5-20250929", maxTokens: 2000 });
-  } catch {
+    console.log(`[Discovery] Step 5 analysis: ${parsed ? parsed.competitors?.length + " competitors" : "null (API key missing or call failed)"}`);
+  } catch (e) {
+    console.log(`[Discovery] Step 5 error: ${e.message}`);
     return { industry: productMeta.category, competitors: [], market_summary: "" };
   }
-  if (!parsed) return { industry: productMeta.category, competitors: [], market_summary: "" };
+  if (!parsed) return { industry: productMeta.category, competitors: [], market_summary: "", _debug: "claude_returned_null" };
 
   // Post-process: filter out blocklisted domains, self-references, and invalid URLs
   parsed.competitors = (parsed.competitors || []).filter(c => {
@@ -564,12 +695,139 @@ JSON only:
     } catch { return false; }
   });
 
+  // Sort by match_score descending (highest match first)
+  if (parsed.competitors) {
+    parsed.competitors.sort((a, b) => (b.match_score || 0) - (a.match_score || 0));
+  }
+
   // Ensure the response has the fields the UI expects
   parsed.industry = parsed.industry || productMeta.category;
   parsed.market_summary = parsed.market_summary || "";
   parsed._productMeta = { name: productMeta.product_name, category: productMeta.category, subcategory: productMeta.subcategory };
+  parsed._debug = { searchResults: allSearchResults.length, deduped: dedupedResults.length, hasApiKey: !!env.ANTHROPIC_API_KEY };
 
   return parsed;
+}
+
+// ─── COMPETITOR RADAR: REDDIT RSS ────────────────────────────────────────────
+
+async function suggestSubreddits(env, productMeta) {
+  const prompt = `Based on this product, suggest 3-5 Reddit subreddits where competitors or alternative tools are most likely to be discussed.
+
+Product: ${productMeta.product_name}
+Category: ${productMeta.category}
+Niche: ${productMeta.subcategory || productMeta.category}
+Keywords: ${(productMeta.keywords || []).join(", ")}
+Audience: ${productMeta.target_audience || "not specified"}
+
+Rules:
+- Only suggest REAL subreddits that actually exist on Reddit
+- Prioritize active subreddits where people ask "what tools do you use for X?" or share tool recommendations
+- Include both broad category subs and niche-specific subs
+- Do NOT suggest generic subs like r/technology or r/startups unless highly relevant
+
+JSON only:
+{"subreddits":[{"name":"subredditname","reason":"Why this sub is relevant (one sentence)"}]}`;
+
+  try {
+    return await callClaude(env, prompt, { maxTokens: 500 });
+  } catch { return null; }
+}
+
+async function fetchRedditRSS(subreddit) {
+  if (!canSubrequest()) return [];
+  try {
+    trackSubrequest();
+    const r = await fetch(`https://www.reddit.com/r/${subreddit}/new.json?limit=25`, {
+      headers: { "User-Agent": "ScopeHound/1.0 competitive-intel-bot" },
+    });
+    if (!r.ok) return [];
+    const data = await r.json();
+    return (data?.data?.children || []).map(c => ({
+      id: c.data.id,
+      title: c.data.title,
+      selftext: (c.data.selftext || "").slice(0, 500),
+      url: `https://reddit.com${c.data.permalink}`,
+      author: c.data.author,
+      created: c.data.created_utc,
+      score: c.data.score,
+    }));
+  } catch { return []; }
+}
+
+async function radarScanReddit(env, settings, state, productMeta, existingCompetitors) {
+  const subs = settings.radarSubreddits || [];
+  if (subs.length === 0) return [];
+  const keywords = (productMeta?.keywords || []).concat([
+    productMeta?.category, productMeta?.subcategory,
+  ]).filter(Boolean).map(k => k.toLowerCase());
+  if (keywords.length === 0) return [];
+
+  const radarState = state.radar || { seenPostIds: [] };
+  const seenIds = new Set(radarState.seenPostIds || []);
+  const existingDomains = existingCompetitors.map(c => {
+    try { return new URL(c.website.startsWith("http") ? c.website : "https://" + c.website).hostname.replace(/^www\./, ""); } catch { return ""; }
+  }).filter(Boolean);
+
+  const newPosts = [];
+  for (const sub of subs) {
+    const subName = typeof sub === "string" ? sub : sub.name;
+    console.log(`  Radar: r/${subName}...`);
+    const posts = await fetchRedditRSS(subName);
+    for (const p of posts) {
+      if (seenIds.has(p.id)) continue;
+      seenIds.add(p.id);
+      // Keyword match on title + body
+      const text = (p.title + " " + p.selftext).toLowerCase();
+      if (keywords.some(k => text.includes(k))) {
+        newPosts.push({ ...p, subreddit: subName });
+      }
+    }
+  }
+
+  // Update seen IDs (keep last 500 to avoid unbounded growth)
+  state.radar = { seenPostIds: [...seenIds].slice(-500) };
+
+  if (newPosts.length === 0) return [];
+
+  // Use Claude to extract actual competitor mentions from matched posts
+  const postSummaries = newPosts.slice(0, 10).map((p, i) =>
+    `${i + 1}. [r/${p.subreddit}] "${p.title}"\n   ${p.selftext.slice(0, 200)}\n   ${p.url}`
+  ).join("\n\n");
+
+  try {
+    const result = await callClaude(env, `You are a competitive intelligence analyst. These Reddit posts were flagged as relevant to ${productMeta.product_name} (${productMeta.subcategory || productMeta.category}).
+
+Extract any competitor products or tools mentioned in these posts that compete with ${productMeta.product_name}.
+
+## Posts
+${postSummaries}
+
+## Already Monitoring
+${existingDomains.join(", ") || "(none)"}
+
+## Instructions
+- Only extract REAL products/tools with identifiable names and URLs
+- Skip posts that are just general discussion with no specific tools mentioned
+- Skip any products already in the "Already Monitoring" list
+- For each competitor, include which post mentioned it
+
+JSON only:
+{"competitors":[{"name":"","url":"","reason":"Why it competes","source_post":"Post title","subreddit":"","match_score":0}]}
+If no competitors found, return: {"competitors":[]}`, { maxTokens: 1000 });
+
+    return (result?.competitors || []).filter(c => c.name && c.url);
+  } catch { return []; }
+}
+
+function formatRadarAlert(radarFinds) {
+  let text = `🔭 *Competitor Radar* — ${radarFinds.length} new competitor${radarFinds.length > 1 ? "s" : ""} spotted\n`;
+  for (const c of radarFinds) {
+    const score = c.match_score ? ` · ${c.match_score}% match` : "";
+    text += `\n>*${c.name}* (${c.url})${score}\n>${c.reason}\n>_Found in r/${c.subreddit}: "${c.source_post}"_\n`;
+  }
+  text += `\n_Add these via /setup or reply with_ \`/scopehound add <url>\``;
+  return text;
 }
 
 // ─── PRICING COMPARISON ─────────────────────────────────────────────────────
@@ -728,22 +986,93 @@ function withTimeout(promise, ms) {
   });
 }
 
-// ─── PRODUCT HUNT ────────────────────────────────────────────────────────────
+// ─── PRODUCT HUNT (public page scraping — no API token needed) ──────────────
 
-async function fetchProductHuntPosts(topic, token) {
-  if (!token) return [];
-  const query = `{ posts(first: 20, topic: "${topic}") { edges { node { id name tagline url votesCount createdAt website } } } }`;
+async function fetchProductHuntPosts(topicSlug) {
+  const html = await fetchUrl(`https://www.producthunt.com/topics/${topicSlug}`);
+  if (!html) return [];
   try {
-    const r = await fetch("https://api.producthunt.com/v2/api/graphql", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
+    // PH is a Next.js app — extract __NEXT_DATA__ JSON for structured product data
+    const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (nextDataMatch) {
+      const nextData = JSON.parse(nextDataMatch[1]);
+      // Navigate the Next.js page props to find posts
+      const posts = extractPHPostsFromNextData(nextData);
+      if (posts.length > 0) return posts;
+    }
+    // Fallback: extract from HTML links + text
+    return extractPHPostsFromHTML(html);
+  } catch (e) { console.log(`  PH parse error: ${e.message}`); return extractPHPostsFromHTML(html); }
+}
+
+function extractPHPostsFromNextData(nextData) {
+  const posts = [];
+  try {
+    // Traverse the Next.js data tree to find product nodes
+    const json = JSON.stringify(nextData);
+    // Look for product-like objects with name, tagline, url patterns
+    const postRegex = /"name"\s*:\s*"([^"]+)"[^}]*"tagline"\s*:\s*"([^"]+)"[^}]*"slug"\s*:\s*"([^"]+)"/g;
+    let m;
+    const seen = new Set();
+    while ((m = postRegex.exec(json)) !== null && posts.length < 20) {
+      const name = m[1], tagline = m[2], slug = m[3];
+      if (seen.has(slug) || name.length < 2 || tagline.length < 5) continue;
+      seen.add(slug);
+      // Extract votesCount near this match if available
+      const ctx = json.slice(Math.max(0, m.index - 200), m.index + m[0].length + 200);
+      const votesMatch = ctx.match(/"votesCount"\s*:\s*(\d+)/);
+      posts.push({
+        id: slug, name, tagline,
+        url: `https://www.producthunt.com/posts/${slug}`,
+        votesCount: votesMatch ? parseInt(votesMatch[1]) : 0,
+      });
+    }
+  } catch {}
+  return posts;
+}
+
+function extractPHPostsFromHTML(html) {
+  const posts = [];
+  const seen = new Set();
+  // Match links to /posts/slug with nearby text
+  const linkRegex = /<a[^>]*href=["']\/posts\/([^"'?#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = linkRegex.exec(html)) !== null && posts.length < 20) {
+    const slug = m[1];
+    if (seen.has(slug) || slug.includes("/")) continue;
+    seen.add(slug);
+    const name = m[2].replace(/<[^>]+>/g, "").trim();
+    if (name.length < 2 || name.length > 100) continue;
+    posts.push({
+      id: slug, name, tagline: "",
+      url: `https://www.producthunt.com/posts/${slug}`,
+      votesCount: 0,
     });
-    if (!r.ok) return [];
-    const data = await r.json();
-    if (data.errors) return [];
-    return data.data.posts.edges.map((e) => e.node);
-  } catch (e) { console.log(`  PH error: ${e.message}`); return []; }
+  }
+  return posts;
+}
+
+async function suggestPHTopics(env, productMeta) {
+  const prompt = `Based on this product, suggest 3-5 Product Hunt topic slugs where competitors or similar tools would be listed.
+
+Product: ${productMeta.product_name || productMeta.name || "unknown"}
+Category: ${productMeta.category}
+Niche: ${productMeta.subcategory || productMeta.category}
+Keywords: ${(productMeta.keywords || []).join(", ")}
+Audience: ${productMeta.target_audience || "not specified"}
+
+Rules:
+- Only suggest REAL Product Hunt topic slugs (lowercase, hyphenated, e.g. "affiliate-marketing", "developer-tools", "email-marketing")
+- Check that the slug matches PH's actual topic taxonomy
+- Prioritize topics where competing products would be launched
+- Include both broad and niche-specific topics
+
+JSON only:
+{"topics":[{"slug":"topic-slug","name":"Human Readable Name","reason":"Why this topic is relevant (one sentence)"}]}`;
+
+  try {
+    return await callClaude(env, prompt, { maxTokens: 500 });
+  } catch { return null; }
 }
 
 // ─── AD LIBRARY LOOKUP ──────────────────────────────────────────────────────
@@ -754,7 +1083,8 @@ async function fetchMetaAds(domain, companyName, metaToken, env) {
   const cached = await env.STATE.get(cacheKey);
   if (cached) return JSON.parse(cached);
 
-  if (!metaToken) return null;
+  if (!metaToken || !canSubrequest()) return null;
+  trackSubrequest();
 
   // Search Meta Ad Library by company name
   const searchName = companyName || domain.split(".")[0];
@@ -929,7 +1259,6 @@ async function runMonitor(env, configOverride, userId) {
   const alerts = [];
   const historyEvents = [];
   const slackUrl = settings.slackWebhookUrl;
-  const phToken = settings.productHuntToken;
   const phTopics = settings.productHuntTopics || [];
   const phMinVotes = settings.phMinVotes ?? 0;
   const keywords = settings.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS;
@@ -992,35 +1321,45 @@ async function runMonitor(env, configOverride, userId) {
         ps.textSnapshot = newText;
         ps.lastChecked = new Date().toISOString();
       } else if (newHash !== ps.hash) {
-        console.log(`    CHANGED`);
         const oldText = ps.textSnapshot || "";
         const diff = computeTextDiff(oldText, newText);
-        let analysis = null;
-        let pricingChanges = null;
 
-        if (page.type === "pricing") {
-          const newPricing = await extractPricingWithLLM(content, env);
-          if (newPricing && cs.pricing) pricingChanges = comparePricing(cs.pricing, newPricing);
-          if (newPricing) cs.pricing = newPricing;
-          analysis = await analyzePageChange(env, competitor.name, page.label, page.type, diff);
-          if (!analysis) analysis = { summary: "Pricing page changed", priority: "high", analysis: "", recommendation: "Review pricing page." };
+        // Skip alert if diff is trivial (hash changed but no meaningful text diff)
+        const hasMeaningfulDiff = diff.added.length > 0 || diff.removed.length > 0;
+        if (!hasMeaningfulDiff) {
+          console.log(`    Hash changed but no meaningful text diff — skipping alert`);
+          ps.hash = newHash;
+          ps.textSnapshot = newText;
+          ps.lastChecked = new Date().toISOString();
         } else {
-          analysis = await analyzePageChange(env, competitor.name, page.label, page.type, diff);
-          if (!analysis) analysis = { summary: "Page content changed", priority: "medium", analysis: "", recommendation: "Review the page." };
-        }
+          console.log(`    CHANGED (${diff.added.length} added, ${diff.removed.length} removed)`);
+          let analysis = null;
+          let pricingChanges = null;
 
-        alerts.push(formatPageChangeAlert(competitor.name, page, analysis, diff, pricingChanges));
-        historyEvents.push({
-          date: new Date().toISOString(), competitor: competitor.name,
-          pageId: page.id, pageLabel: page.label, type: "page_change",
-          priority: analysis.priority, summary: analysis.summary,
-          analysis: analysis.analysis, recommendation: analysis.recommendation,
-          diff: { before: diff.beforeExcerpt, after: diff.afterExcerpt },
-        });
-        ps.hash = newHash;
-        ps.textSnapshot = newText;
-        ps.lastChecked = new Date().toISOString();
-        ps.lastChanged = new Date().toISOString();
+          if (page.type === "pricing") {
+            const newPricing = await extractPricingWithLLM(content, env);
+            if (newPricing && cs.pricing) pricingChanges = comparePricing(cs.pricing, newPricing);
+            if (newPricing) cs.pricing = newPricing;
+            analysis = await analyzePageChange(env, competitor.name, page.label, page.type, diff);
+            if (!analysis) analysis = { summary: "Pricing page changed", priority: "high", analysis: "", recommendation: "Review pricing page." };
+          } else {
+            analysis = await analyzePageChange(env, competitor.name, page.label, page.type, diff);
+            if (!analysis) analysis = { summary: "Page content changed", priority: "medium", analysis: "", recommendation: "Review the page." };
+          }
+
+          alerts.push(formatPageChangeAlert(competitor.name, page, analysis, diff, pricingChanges));
+          historyEvents.push({
+            date: new Date().toISOString(), competitor: competitor.name,
+            pageId: page.id, pageLabel: page.label, type: "page_change",
+            priority: analysis.priority, summary: analysis.summary,
+            analysis: analysis.analysis, recommendation: analysis.recommendation,
+            diff: { before: diff.beforeExcerpt, after: diff.afterExcerpt },
+          });
+          ps.hash = newHash;
+          ps.textSnapshot = newText;
+          ps.lastChecked = new Date().toISOString();
+          ps.lastChanged = new Date().toISOString();
+        }
       } else {
         console.log(`    Unchanged`);
         ps.lastChecked = new Date().toISOString();
@@ -1083,7 +1422,7 @@ async function runMonitor(env, configOverride, userId) {
       const phState = state.productHunt[topic.slug] || { postIds: [] };
       const lastSeenIds = phState.postIds || [];
       const isFirstRun = lastSeenIds.length === 0;
-      const posts = await fetchProductHuntPosts(topic.slug, phToken);
+      const posts = await fetchProductHuntPosts(topic.slug);
       const filtered = posts.filter((p) => p.votesCount >= phMinVotes);
       if (isFirstRun) {
         console.log(`    Indexed ${filtered.length} posts (first run)`);
@@ -1103,6 +1442,26 @@ async function runMonitor(env, configOverride, userId) {
         }
       }
       state.productHunt[topic.slug] = { postIds: filtered.map((p) => p.id) };
+    }
+  }
+
+  // ── COMPETITOR RADAR (Reddit) ──
+  if (hasFeature(userTier, "competitor_radar") && (settings.radarSubreddits || []).length > 0) {
+    console.log(`\n── Competitor Radar ──`);
+    const productMeta = settings._productMeta || null;
+    const radarFinds = await radarScanReddit(env, settings, state, productMeta, competitors);
+    if (radarFinds.length > 0) {
+      console.log(`  ${radarFinds.length} new competitor(s) spotted`);
+      alerts.push({ priority: "medium", text: formatRadarAlert(radarFinds) });
+      for (const c of radarFinds) {
+        historyEvents.push({
+          date: new Date().toISOString(), type: "radar", priority: "medium",
+          summary: `New competitor spotted: ${c.name}`, url: c.url,
+          analysis: c.reason, source: `r/${c.subreddit}`,
+        });
+      }
+    } else {
+      console.log(`  No new competitors found`);
     }
   }
 
@@ -1141,9 +1500,30 @@ async function runMonitor(env, configOverride, userId) {
     slackResults.push(await sendSlack(slackUrl, message));
   } else {
     console.log("\nNo changes detected.");
-    const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-    const totalPages = competitors.reduce((n, c) => n + (c.pages?.length || 0) + (c.blogRss ? 1 : 0), 0);
-    slackResults.push(await sendSlack(slackUrl, `🐺 *ScopeHound Daily Report* — ${date}\n\nScanned ${competitors.length} competitor(s) across ${totalPages} page(s) — no changes detected. All quiet on the competitive front.`));
+    const totalPages = competitors.reduce((n, c) => n + (c.pages?.length || 0), 0);
+    const totalBlogs = competitors.filter(c => c.blogRss).length;
+    // Calculate next scan time based on tier
+    const CRON_SLOTS = [3, 9, 15, 21];
+    const OPERATOR_SLOTS_MSG = [9, 21];
+    const nowHour = new Date().getUTCHours();
+    let nextSlot;
+    const slotsForTier = (userTier === "operator") ? OPERATOR_SLOTS_MSG : (userTier === "scout" || userTier === "recon") ? [] : CRON_SLOTS;
+    if (slotsForTier.length > 0) {
+      nextSlot = slotsForTier.find(s => s > nowHour);
+      if (nextSlot === undefined) nextSlot = slotsForTier[0];
+      const hoursUntil = nextSlot > nowHour ? nextSlot - nowHour : (24 - nowHour + nextSlot);
+      var nextScanText = `Next scan in ~${hoursUntil}h.`;
+    } else {
+      var nextScanText = "Manual scan available once per 24h.";
+    }
+    // Build itemized source list
+    const sources = [`${competitors.length} competitors (${totalPages} pages)`];
+    if (totalBlogs > 0) sources.push(`${totalBlogs} blog RSS feed${totalBlogs > 1 ? "s" : ""}`);
+    if (phTopics.length > 0) sources.push(`Product Hunt (${phTopics.map(t => t.name).join(", ")})`);
+    // Reddit will be added here when radar is live
+    const radarSubs = settings.radarSubreddits || [];
+    if (radarSubs.length > 0) sources.push(`Reddit (${radarSubs.length} subreddit${radarSubs.length > 1 ? "s" : ""})`);
+    slackResults.push(await sendSlack(slackUrl, `🐺 *ScopeHound* — Checked ${sources.join(" · ")}. Nothing to report. ${nextScanText}`));
   }
 
   const slackOk = slackResults.filter(r => r.ok).length;
@@ -1302,11 +1682,14 @@ async function detectRssFeed(websiteUrl) {
   const base = websiteUrl.replace(/\/+$/, "");
   const paths = ["/feed/", "/blog/feed/", "/rss.xml", "/blog/rss.xml", "/feed.xml", "/atom.xml"];
   for (const path of paths) {
+    if (!canSubrequest()) break;
     try {
+      trackSubrequest();
       const r = await fetch(base + path, {
         headers: { "User-Agent": "Scopehound/3.0" },
-        redirect: "follow",
+        redirect: "manual",
       });
+      if ([301, 302, 303, 307, 308].includes(r.status)) continue;
       if (r.ok) {
         const ct = r.headers.get("content-type") || "";
         const text = await r.text();
@@ -1386,8 +1769,10 @@ async function discoverPages(websiteUrl) {
     // If no pricing found, check common paths directly
     if (!pages.find(p => p.type === "pricing")) {
       for (const tryPath of ["/pricing", "/plans", "/plans-pricing", "/pricing-plans"]) {
+        if (!canSubrequest()) break;
         try {
-          const r = await fetch(origin + tryPath, { headers: { "User-Agent": "Scopehound/3.0" }, redirect: "follow" });
+          trackSubrequest();
+          const r = await fetch(origin + tryPath, { headers: { "User-Agent": "Scopehound/3.0" }, redirect: "manual" });
           if (r.ok) { pages.push({ url: origin + tryPath, type: "pricing", label: "Pricing" }); break; }
         } catch {}
       }
@@ -2005,7 +2390,11 @@ th{color:#6b7280;font-weight:600;font-size:11px;text-transform:uppercase;letter-
 <button data-tab="changes">Recent Changes</button>
 <button data-tab="pricing">Pricing</button>
 <button data-tab="seo">SEO Signals</button>
-<a href="/setup" style="margin-left:auto;font-size:12px;color:#6b7280;padding:8px 12px;border:1px solid #2a3038;border-radius:2px;text-decoration:none;display:flex;align-items:center;gap:4px">+ Manage Competitors</a>
+<div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+<button id="scanBtn" onclick="triggerScan()" style="font-size:12px;padding:8px 16px;background:#5c6b3c;color:#d4d8de;border:none;border-radius:2px;cursor:pointer;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;display:none">Scan Now</button>
+<span id="scanCooldown" style="font-size:11px;color:#6b7280;display:none"></span>
+<a href="/setup" style="font-size:12px;color:#6b7280;padding:8px 12px;border:1px solid #2a3038;border-radius:2px;text-decoration:none;display:flex;align-items:center;gap:4px">+ Manage Competitors</a>
+</div>
 </nav>
 <main>
 <div id="content"><div class="loading">Loading dashboard data...</div></div>
@@ -2025,6 +2414,42 @@ const tabs={overview:renderOverview,changes:renderChanges,pricing:renderPricing,
 document.querySelectorAll("nav button").forEach(btn=>{btn.addEventListener("click",()=>{document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));btn.classList.add("active");if(DATA)tabs[btn.dataset.tab]();});});
 fetch("./api/dashboard-data").then(r=>r.json()).then(d=>{DATA=d;$("lastUpdated").textContent="Last scan: "+timeAgo(d.generatedAt);renderOverview();}).catch(()=>{content.innerHTML='<div class="empty">Failed to load data. <a href="./setup">Run setup</a> or hit /test first.</div>';});
 fetch("./api/user/profile").then(r=>r.ok?r.json():null).then(u=>{if(u&&u.email){$("userBar").innerHTML=esc(u.email)+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}).catch(()=>{});
+// ── Scan Now button with cooldown ──
+function updateScanButton(status){
+  const btn=$("scanBtn"),cd=$("scanCooldown");
+  if(!status){btn.style.display="none";cd.style.display="none";return;}
+  if(status.canScan){
+    btn.style.display="inline-block";btn.disabled=false;btn.style.opacity="1";btn.textContent="Scan Now";
+    cd.style.display="none";
+  } else {
+    btn.style.display="inline-block";btn.disabled=true;btn.style.opacity="0.4";btn.textContent="Scan Now";
+    cd.style.display="inline";
+    const h=status.hoursRemaining||0;
+    cd.textContent=h>1?"Next scan in "+h+"h":"Next scan in <1h";
+    // Auto-refresh countdown every minute
+    if(!window._scanTimer)window._scanTimer=setInterval(()=>{checkScanStatus();},60000);
+  }
+}
+function checkScanStatus(){
+  fetch("./api/scan/status").then(r=>r.ok?r.json():null).then(s=>{if(s)updateScanButton(s);}).catch(()=>{});
+}
+async function triggerScan(){
+  const btn=$("scanBtn");
+  btn.disabled=true;btn.textContent="Scanning...";btn.style.opacity="0.6";
+  try{
+    const r=await fetch("./api/config/trigger-scan",{method:"POST"});
+    const d=await r.json();
+    if(d.cooldown){updateScanButton(d);return;}
+    if(d.error){btn.textContent="Error";setTimeout(()=>{checkScanStatus();},2000);return;}
+    btn.textContent=d.alertsDetected+" alert"+(d.alertsDetected===1?"":"s")+" found";
+    btn.style.opacity="1";
+    // Refresh dashboard data
+    fetch("./api/dashboard-data").then(r=>r.json()).then(d2=>{DATA=d2;$("lastUpdated").textContent="Last scan: just now";const active=document.querySelector("nav button.active");if(active&&tabs[active.dataset.tab])tabs[active.dataset.tab]();});
+    // Re-check cooldown status after scan
+    setTimeout(()=>{checkScanStatus();},3000);
+  }catch(e){btn.textContent="Scan failed";setTimeout(()=>{checkScanStatus();},3000);}
+}
+checkScanStatus();
 </script>
 </body>
 </html>`;
@@ -2108,8 +2533,8 @@ input:focus{border-color:#5c6b3c}
 <div id="step2" class="hidden">
 <h2>Step 3: Product Hunt (Optional)</h2>
 <div class="panel">
-<div class="field"><label>Product Hunt API Token</label><input type="text" id="phToken" placeholder="Optional — get from api.producthunt.com/v2/oauth/applications"></div>
-<div class="field"><label>Topics to Monitor (comma-separated slugs)</label><input type="text" id="phTopics" placeholder="e.g. affiliate-marketing, influencer-marketing"></div>
+<div class="field"><label>Topics to Monitor (comma-separated slugs)</label><input type="text" id="phTopicsSelf" placeholder="e.g. affiliate-marketing, developer-tools, email-marketing"></div>
+<p style="font-size:12px;color:#6b7280;margin-top:4px">Lowercase, hyphenated PH topic slugs. No API token needed.</p>
 </div>
 <div class="actions"><button class="btn btn-secondary" onclick="goStep(1)">Back</button><button class="btn btn-primary" onclick="goStep(3)">Next</button></div>
 </div>
@@ -2198,7 +2623,7 @@ async function testSlack(){
 function renderSummary(){
   let h='<div class="summary-item"><div class="summary-label">Competitors</div>'+comps.length+' configured</div>';
   h+='<div class="summary-item"><div class="summary-label">Slack</div>'+($("slackUrl").value?"Connected":"Not set")+'</div>';
-  h+='<div class="summary-item"><div class="summary-label">Product Hunt</div>'+($("phToken").value?"Token set":"Not configured")+'</div>';
+  h+='<div class="summary-item"><div class="summary-label">Product Hunt</div>'+($("phTopicsSelf").value?$("phTopicsSelf").value:"Not configured")+'</div>';
   h+='<div class="summary-item"><div class="summary-label">Schedule</div>Daily at 9am UTC</div>';
   $("summaryPanel").innerHTML=h;
 }
@@ -2220,9 +2645,9 @@ async function launch(){
   $("launchBtn").textContent="Saving...";
   try{
     const competitors=buildCompetitors();
-    const phTopicStr=$("phTopics").value;
+    const phTopicStr=$("phTopicsSelf").value;
     const topics=phTopicStr?phTopicStr.split(",").map(s=>s.trim()).filter(Boolean).map(s=>({slug:s,name:s.split("-").map(w=>w[0].toUpperCase()+w.slice(1)).join(" ")})):[];
-    const settings={slackWebhookUrl:$("slackUrl").value||null,productHuntToken:$("phToken").value||null,productHuntTopics:topics};
+    const settings={slackWebhookUrl:$("slackUrl").value||null,productHuntTopics:topics};
     const h={"Content-Type":"application/json","X-Admin-Token":tok};
     const [r1,r2]=await Promise.all([fetch(base+"/api/config/competitors",{method:"POST",headers:h,body:JSON.stringify({competitors})}),fetch(base+"/api/config/settings",{method:"POST",headers:h,body:JSON.stringify(settings)})]);
     const d1=await r1.json(),d2=await r2.json();
@@ -2254,8 +2679,7 @@ async function launch(){
     }
     if(d.settings){
       if(d.settings.slackWebhookUrl)$("slackUrl").value=d.settings.slackWebhookUrl;
-      if(d.settings.productHuntToken)$("phToken").value=d.settings.productHuntToken;
-      if(d.settings.productHuntTopics&&d.settings.productHuntTopics.length)$("phTopics").value=d.settings.productHuntTopics.map(t=>t.slug).join(", ");
+      if(d.settings.productHuntTopics&&d.settings.productHuntTopics.length)$("phTopicsSelf").value=d.settings.productHuntTopics.map(t=>t.slug).join(", ");
     }
   }catch(e){}
 })();
@@ -2574,6 +2998,18 @@ Add to Slack
 <div class="ai-or">or add manually</div>
 <div id="compList"></div>
 <button class="btn btn-secondary btn-sm" onclick="addCompetitor()" id="addCompBtn">+ Add Competitor</button>
+<div id="radarSection" style="margin-top:24px;display:none">
+<h3 style="font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px;color:#d4d8de">Product Hunt Monitoring</h3>
+<p class="subtitle" style="margin-bottom:12px">Monitor PH topics for new product launches in your space.</p>
+<div id="phTopics" style="margin-bottom:12px"></div>
+<button class="btn btn-secondary btn-sm" id="suggestPHBtn" onclick="suggestPH()" style="display:none">Suggest Topics</button>
+<div id="phMsg"></div>
+<h3 style="font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;margin:20px 0 8px;color:#d4d8de">Reddit Radar</h3>
+<p class="subtitle" style="margin-bottom:12px">Monitor subreddits for new competitor mentions.</p>
+<div id="radarSubs" style="margin-bottom:12px"></div>
+<button class="btn btn-secondary btn-sm" id="suggestSubsBtn" onclick="suggestSubs()" style="display:none">Suggest Subreddits</button>
+<div id="radarMsg"></div>
+</div>
 <div class="nav-btns">
 <button class="btn btn-secondary" onclick="goStep(1)">Back</button>
 <button class="btn btn-primary" id="compNext" onclick="goStep(3)">Next</button>
@@ -2629,6 +3065,13 @@ async function loadUserInfo(){
     competitors=c.competitors.map(comp=>({name:comp.name,website:comp.website,blogRss:comp.blogRss||null,pages:comp.pages||[],_discovered:comp.pages?comp.pages.map(p=>({url:p.url,type:p.type,label:p.label})):[]
     }));renderCompetitors();
   }
+  if(c.settings&&c.settings.productHuntTopics&&c.settings.productHuntTopics.length>0){
+    window._phTopics=c.settings.productHuntTopics;
+    renderPHTopics(c.settings.productHuntTopics.map(t=>({slug:t.slug,name:t.name,reason:t.slug})));
+  }
+  if(c.settings&&c.settings.radarSubreddits&&c.settings.radarSubreddits.length>0){
+    window._radarSubreddits=c.settings.radarSubreddits;
+  }
   // Auto-advance past Slack if already connected
   if(slackVerified)goStep(2);
   }}catch(e){}
@@ -2680,6 +3123,8 @@ async function findCompetitors(){
     const d=await r.json();
     if(d.error){el.innerHTML='<div class="msg msg-err">'+esc(d.error)+'</div>';return;}
     aiSuggestions=d.competitors||[];
+    // Store product meta for radar use
+    if(d._productMeta)window._productMeta=d._productMeta;
     if(aiSuggestions.length===0){el.innerHTML='<div class="msg">No competitors found. Try adding them manually below.</div>';return;}
     const overlapColors={direct:"#7a8c52",adjacent:"#c9952e",broader_platform:"#6b7280"};
     const overlapLabels={direct:"Direct",adjacent:"Adjacent",broader_platform:"Broader Platform"};
@@ -2689,10 +3134,15 @@ async function findCompetitors(){
     html+='<div style="font-size:12px;color:#6b7280;margin:0 0 8px">Select competitors to add:</div>';
     html+=aiSuggestions.map((c,i)=>{
       const badge=c.overlap&&overlapLabels[c.overlap]?'<span style="font-size:10px;background:'+overlapColors[c.overlap]+'22;color:'+overlapColors[c.overlap]+';padding:2px 6px;border-radius:4px;margin-left:8px">'+overlapLabels[c.overlap]+'</span>':"";
-      return '<div class="ai-result" onclick="toggleAiResult(event,this,'+i+')"><input type="checkbox" id="aicheck'+i+'" onchange="onAiCheck('+i+')"><div><div class="ai-name">'+esc(c.name)+badge+'</div><div class="ai-url">'+esc(c.url)+'</div><div class="ai-reason">'+esc(c.reason||c.description||"")+'</div></div></div>';
+      const score=typeof c.match_score==="number"?c.match_score:0;
+      const scoreColor=score>=75?"#7a8c52":score>=50?"#c9952e":"#6b7280";
+      const scoreBadge=score>0?'<span style="font-size:11px;font-weight:600;color:'+scoreColor+';margin-left:8px" title="Competitive overlap score">'+score+'%</span>':"";
+      return '<div class="ai-result" onclick="toggleAiResult(event,this,'+i+')"><input type="checkbox" id="aicheck'+i+'" onchange="onAiCheck('+i+')"><div><div class="ai-name">'+esc(c.name)+scoreBadge+badge+'</div><div class="ai-url">'+esc(c.url)+'</div><div class="ai-reason">'+esc(c.reason||c.description||"")+'</div></div></div>';
     }).join("");
     html+='<button class="btn btn-primary btn-sm" onclick="addSelectedAi()" style="margin-top:12px" id="addAiBtn" disabled>Add Selected Competitors</button>';
     el.innerHTML=html;
+    // Trigger radar subreddit suggestions for Command users
+    showRadarSection();
   }catch(e){clearInterval(statusInterval);el.innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';}
 }
 function toggleAiResult(ev,el,idx){
@@ -2826,8 +3276,121 @@ function renderReview(){
     '<div class="review-item"><span class="review-label">Slack</span><span>Connected</span></div>'
     +'<div class="review-item"><span class="review-label">Competitors</span><span>'+ready.length+'</span></div>'
     +'<div class="review-item"><span class="review-label">Pages monitored</span><span>'+totalPages+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Product Hunt</span><span>'+(window._phTopics.length>0?window._phTopics.map(t=>t.name).join(", "):"Not configured")+'</span></div>'
+    +'<div class="review-item"><span class="review-label">Reddit Radar</span><span>'+(window._radarSubreddits.length>0?window._radarSubreddits.map(s=>"r/"+s).join(", "):"Not configured")+'</span></div>'
     +'<div class="review-item"><span class="review-label">Plan</span><span>'+(window._tier||"scout").charAt(0).toUpperCase()+(window._tier||"scout").slice(1)+'</span></div>'
     +'<div class="review-item"><span class="review-label">Schedule</span><span>Daily at 9am UTC</span></div>';
+}
+// ── Product Hunt + Reddit Radar ──
+window._radarSubreddits=[];
+window._phTopics=[];
+function showRadarSection(){
+  document.getElementById("radarSection").style.display="block";
+  document.getElementById("suggestPHBtn").style.display="inline-block";
+  if(window._tier==="command"){
+    document.getElementById("suggestSubsBtn").style.display="inline-block";
+  }
+  // Auto-suggest if we have product meta
+  if(window._productMeta){
+    if(window._phTopics.length===0)suggestPH();
+    if(window._tier==="command"&&window._radarSubreddits.length===0)suggestSubs();
+  }
+}
+async function suggestPH(){
+  if(!window._productMeta){document.getElementById("phMsg").innerHTML='<div class="msg msg-info">Run AI discovery first.</div>';return;}
+  const btn=document.getElementById("suggestPHBtn");
+  btn.disabled=true;btn.textContent="Finding topics...";
+  try{
+    const r=await fetch("/api/config/suggest-ph-topics",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productMeta:window._productMeta})});
+    const d=await r.json();
+    if(d.error){document.getElementById("phMsg").innerHTML='<div class="msg msg-err">'+esc(d.error)+'</div>';btn.disabled=false;btn.textContent="Suggest Topics";return;}
+    const topics=d.topics||[];
+    if(topics.length===0){document.getElementById("phMsg").innerHTML='<div class="msg">No relevant PH topics found.</div>';btn.disabled=false;btn.textContent="Suggest Topics";return;}
+    window._phTopics=topics.map(t=>({slug:t.slug,name:t.name}));
+    renderPHTopics(topics);
+    btn.style.display="none";
+  }catch(e){document.getElementById("phMsg").innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';btn.disabled=false;btn.textContent="Suggest Topics";}
+}
+function renderPHTopics(topics){
+  const el=document.getElementById("phTopics");
+  el.innerHTML=topics.map((t,i)=>{
+    return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3038">'
+      +'<input type="checkbox" checked id="phCheck'+i+'" onchange="updatePHSelection()">'
+      +'<div><strong style="color:#c4a747">'+esc(t.name)+'</strong>'
+      +'<div style="font-size:12px;color:#6b7280">'+esc(t.reason||t.slug)+'</div></div></div>';
+  }).join("")
+  +'<div style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="text" id="customPHTopic" placeholder="e.g. developer-tools" style="flex:1"><button class="btn btn-secondary btn-sm" onclick="addCustomPH()">Add</button></div>'
+  +'<div style="font-size:11px;color:#6b7280;margin-top:4px">PH topic slug (lowercase, hyphenated)</div>';
+}
+function updatePHSelection(){
+  const checks=document.querySelectorAll("[id^=phCheck]");
+  const labels=document.querySelectorAll("#phTopics strong");
+  window._phTopics=[];
+  checks.forEach((cb,i)=>{if(cb.checked&&labels[i]){const name=labels[i].textContent;window._phTopics.push({slug:name.toLowerCase().replace(/\s+/g,"-"),name});}});
+}
+function addCustomPH(){
+  const inp=document.getElementById("customPHTopic");
+  let slug=inp.value.trim().toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9-]/g,"");
+  if(!slug)return;
+  const name=slug.split("-").map(w=>w[0].toUpperCase()+w.slice(1)).join(" ");
+  window._phTopics.push({slug,name});
+  const el=document.getElementById("phTopics");
+  const idx=document.querySelectorAll("[id^=phCheck]").length;
+  const div=document.createElement("div");
+  div.style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3038";
+  div.innerHTML='<input type="checkbox" checked id="phCheck'+idx+'" onchange="updatePHSelection()"><div><strong style="color:#c4a747">'+esc(name)+'</strong><div style="font-size:12px;color:#6b7280">Custom topic</div></div>';
+  const addRow=el.querySelector("div:last-child");
+  if(addRow)el.insertBefore(div,addRow);else el.appendChild(div);
+  inp.value="";
+}
+async function suggestSubs(){
+  if(!window._productMeta){document.getElementById("radarMsg").innerHTML='<div class="msg msg-info">Run AI discovery first to enable radar.</div>';return;}
+  const btn=document.getElementById("suggestSubsBtn");
+  btn.disabled=true;btn.textContent="Finding subreddits...";
+  try{
+    const r=await fetch("/api/config/suggest-subreddits",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productMeta:window._productMeta})});
+    const d=await r.json();
+    if(d.error){document.getElementById("radarMsg").innerHTML='<div class="msg msg-err">'+esc(d.error)+'</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";return;}
+    const subs=d.subreddits||[];
+    if(subs.length===0){document.getElementById("radarMsg").innerHTML='<div class="msg">No relevant subreddits found.</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";return;}
+    window._radarSubreddits=subs.map(s=>s.name);
+    renderRadarSubs(subs);
+    btn.style.display="none";
+  }catch(e){document.getElementById("radarMsg").innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";}
+}
+function renderRadarSubs(subs){
+  const el=document.getElementById("radarSubs");
+  el.innerHTML=subs.map((s,i)=>{
+    return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3038">'
+      +'<input type="checkbox" checked id="radarCheck'+i+'" onchange="updateRadarSelection()">'
+      +'<div><strong style="color:#7a8c52">r/'+esc(s.name)+'</strong>'
+      +'<div style="font-size:12px;color:#6b7280">'+esc(s.reason)+'</div></div></div>';
+  }).join("")
+  +'<div style="margin-top:12px;display:flex;align-items:center;gap:8px"><span style="color:#6b7280;font-size:14px;white-space:nowrap">r /</span><input type="text" id="customSubreddit" placeholder="affiliatemarketing" style="flex:1"><button class="btn btn-secondary btn-sm" onclick="addCustomSub()">Add</button></div>'
+  +'<div style="font-size:11px;color:#6b7280;margin-top:4px">Just the subreddit name (we strip r/ and full URLs automatically)</div>';
+}
+function updateRadarSelection(){
+  const allSubs=document.querySelectorAll("[id^=radarCheck]");
+  const labels=document.querySelectorAll("#radarSubs strong");
+  window._radarSubreddits=[];
+  allSubs.forEach((cb,i)=>{if(cb.checked&&labels[i])window._radarSubreddits.push(labels[i].textContent.replace("r/",""));});
+}
+function addCustomSub(){
+  const inp=document.getElementById("customSubreddit");
+  let name=inp.value.trim();
+  // Accept: "affiliatemarketing", "r/affiliatemarketing", "https://reddit.com/r/affiliatemarketing", etc.
+  name=name.replace(/^https?:\/\/(www\.)?reddit\.com\/r\//i,"").replace(/^r\//i,"").replace(/\/.*$/,"").trim();
+  if(!name)return;
+  window._radarSubreddits.push(name);
+  const el=document.getElementById("radarSubs");
+  const idx=document.querySelectorAll("[id^=radarCheck]").length;
+  const div=document.createElement("div");
+  div.style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3038";
+  div.innerHTML='<input type="checkbox" checked id="radarCheck'+idx+'" onchange="updateRadarSelection()"><div><strong style="color:#7a8c52">r/'+esc(name)+'</strong><div style="font-size:12px;color:#6b7280">Custom subreddit</div></div>';
+  // Insert before the "Add custom" input row
+  const addRow=el.querySelector("div:last-child");
+  el.insertBefore(div,addRow);
+  inp.value="";
 }
 function scanProgress(steps){
   return '<div class="scan-progress">'+steps.map((s,i)=>
@@ -2858,6 +3421,9 @@ async function launch(){
     setScanStep(0,"done");setScanStep(1,"active");
     const slackUrlVal=document.getElementById("slackUrl").value.trim();
     const settingsPayload=slackUrlVal?{slackWebhookUrl:slackUrlVal}:{};
+    if(window._productMeta)settingsPayload._productMeta=window._productMeta;
+    if(window._phTopics&&window._phTopics.length>0)settingsPayload.productHuntTopics=window._phTopics;
+    if(window._radarSubreddits&&window._radarSubreddits.length>0)settingsPayload.radarSubreddits=window._radarSubreddits;
     r=await fetch("/api/config/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(settingsPayload)});
     d=await r.json();if(!r.ok){throw new Error(d.error||"Failed to save settings");}
     setScanStep(1,"done");setScanStep(2,"active");
@@ -3085,6 +3651,23 @@ th{color:#6b7280;font-weight:600;font-size:10px;text-transform:uppercase;letter-
 .utm-table{margin-top:4px}
 .utm-table td:last-child{text-align:right;font-weight:700;color:#d4d8de}
 .utm-table td:first-child{color:#9ca3af}
+.tabs{display:flex;gap:0;border-bottom:1px solid #2a3038;margin-bottom:24px}
+.tab{background:none;border:none;color:#6b7280;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;padding:12px 20px;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.2s}
+.tab:hover{color:#d4d8de}
+.tab.active{color:#7a8c52;border-bottom-color:#7a8c52}
+.tab .badge{font-size:9px;background:#c4a74733;color:#c4a747;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:700}
+.contact-msg{background:#12161a;border:1px solid #2a3038;border-radius:2px;padding:20px;margin-bottom:12px}
+.contact-msg.unread{border-left:3px solid #c4a747}
+.contact-meta{display:flex;gap:16px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.contact-meta .name{font-weight:700;color:#d4d8de}
+.contact-meta .email{color:#7a8c52;font-size:13px}
+.contact-meta .time{color:#6b7280;font-size:11px;margin-left:auto}
+.contact-body{color:#9ca3af;font-size:14px;line-height:1.7;white-space:pre-wrap}
+.contact-actions{margin-top:12px;display:flex;gap:8px}
+.contact-actions button{background:none;border:1px solid #2a3038;color:#6b7280;padding:4px 10px;border-radius:2px;font-size:10px;cursor:pointer;text-transform:uppercase;letter-spacing:0.04em}
+.contact-actions button:hover{border-color:#5c6b3c;color:#d4d8de}
+.contact-actions button.del:hover{border-color:#c23030;color:#c23030}
+.empty-state{text-align:center;padding:48px;color:#6b7280;font-size:13px}
 </style>
 </head>
 <body>
@@ -3094,28 +3677,90 @@ th{color:#6b7280;font-weight:600;font-size:10px;text-transform:uppercase;letter-
   <span class="admin-badge">Admin</span>
 </div>
 <div style="display:flex;align-items:center;gap:12px">
-  <button class="refresh-btn" onclick="loadKPIs()">Refresh</button>
+  <button class="refresh-btn" onclick="currentTab==='contacts'?loadContacts():loadKPIs()">Refresh</button>
   <a href="/admin/logout" style="font-size:12px;color:#c23030">Sign Out</a>
 </div>
 </header>
 <main>
-<div id="content"><div class="loading">Loading KPIs...</div></div>
+<div class="tabs">
+  <button class="tab active" onclick="showTab('kpis')">KPIs</button>
+  <button class="tab" onclick="showTab('contacts')">Messages <span class="badge" id="msgCount" style="display:none">0</span></button>
+</div>
+<div id="kpis-tab"><div class="loading">Loading KPIs...</div></div>
+<div id="contacts-tab" style="display:none"><div class="loading">Loading messages...</div></div>
 </main>
 <script>
 function esc(s){if(!s)return"";const d=document.createElement("div");d.textContent=s;return d.innerHTML}
 function fmt$(n){return"$"+Number(n).toLocaleString()}
 function timeAgo(d){if(!d)return"never";const s=Math.floor((Date.now()-new Date(d))/1000);if(s<60)return"just now";if(s<3600)return Math.floor(s/60)+"m ago";if(s<86400)return Math.floor(s/3600)+"h ago";return Math.floor(s/86400)+"d ago";}
 
+let currentTab='kpis';
+function showTab(tab){
+  currentTab=tab;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelector('[onclick="showTab(\\''+tab+'\\')"]').classList.add('active');
+  document.getElementById('kpis-tab').style.display=tab==='kpis'?'':'none';
+  document.getElementById('contacts-tab').style.display=tab==='contacts'?'':'none';
+  if(tab==='contacts')loadContacts();
+}
+
 async function loadKPIs(){
-  document.getElementById("content").innerHTML='<div class="loading">Loading KPIs...</div>';
+  document.getElementById("kpis-tab").innerHTML='<div class="loading">Loading KPIs...</div>';
   try{
     const r=await fetch("/api/admin/kpis");
     if(r.status===401){window.location.href="/admin/login";return;}
     if(!r.ok)throw new Error("Failed to load");
     renderDashboard(await r.json());
   }catch(e){
-    document.getElementById("content").innerHTML='<div class="loading">Failed to load KPIs. '+esc(e.message)+'</div>';
+    document.getElementById("kpis-tab").innerHTML='<div class="loading">Failed to load KPIs. '+esc(e.message)+'</div>';
   }
+}
+
+async function loadContacts(){
+  document.getElementById("contacts-tab").innerHTML='<div class="loading">Loading messages...</div>';
+  try{
+    const r=await fetch("/api/admin/contacts");
+    if(r.status===401){window.location.href="/admin/login";return;}
+    if(!r.ok)throw new Error("Failed to load");
+    const data=await r.json();
+    renderContacts(data.contacts||[]);
+  }catch(e){
+    document.getElementById("contacts-tab").innerHTML='<div class="loading">Failed to load messages. '+esc(e.message)+'</div>';
+  }
+}
+
+async function markRead(id){
+  await fetch("/api/admin/contacts?id="+id,{method:"PATCH"});
+  const el=document.getElementById("msg-"+id);
+  if(el)el.classList.remove("unread");
+}
+
+async function deleteMsg(id){
+  if(!confirm("Delete this message?"))return;
+  await fetch("/api/admin/contacts?id="+id,{method:"DELETE"});
+  const el=document.getElementById("msg-"+id);
+  if(el)el.remove();
+}
+
+function renderContacts(contacts){
+  const unread=contacts.filter(c=>!c.read).length;
+  const badge=document.getElementById("msgCount");
+  if(unread>0){badge.textContent=unread;badge.style.display="";}else{badge.style.display="none";}
+  if(contacts.length===0){
+    document.getElementById("contacts-tab").innerHTML='<div class="empty-state">No messages yet.</div>';
+    return;
+  }
+  let h='';
+  for(const c of contacts){
+    h+='<div class="contact-msg'+(c.read?'':' unread')+'" id="msg-'+esc(c.id)+'">';
+    h+='<div class="contact-meta"><span class="name">'+esc(c.name)+'</span><span class="email">'+esc(c.email)+'</span><span class="time">'+timeAgo(c.createdAt)+'</span></div>';
+    h+='<div class="contact-body">'+esc(c.message)+'</div>';
+    h+='<div class="contact-actions">';
+    if(!c.read)h+='<button onclick="markRead(\\''+c.id+'\\')">Mark Read</button>';
+    h+='<button class="del" onclick="deleteMsg(\\''+c.id+'\\')">Delete</button>';
+    h+='</div></div>';
+  }
+  document.getElementById("contacts-tab").innerHTML=h;
 }
 
 function kpi(label,value,color){
@@ -3192,10 +3837,16 @@ function renderDashboard(d){
   // ── Timestamp ──
   h+='<div style="text-align:center;padding:24px 0;font-size:11px;color:#6b7280">Generated: '+esc(d.generatedAt)+'</div>';
 
-  document.getElementById("content").innerHTML=h;
+  document.getElementById("kpis-tab").innerHTML=h;
 }
 
 loadKPIs();
+// Pre-fetch contact count for badge
+fetch("/api/admin/contacts").then(r=>r.json()).then(d=>{
+  const unread=(d.contacts||[]).filter(c=>!c.read).length;
+  const badge=document.getElementById("msgCount");
+  if(unread>0){badge.textContent=unread;badge.style.display="";}
+}).catch(()=>{});
 </script>
 </body>
 </html>`;
@@ -3283,7 +3934,9 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const reqOrigin = request.headers.get("Origin");
-    const allowedOrigin = reqOrigin && new URL(reqOrigin).hostname === url.hostname ? reqOrigin : url.origin;
+    const isSameHost = reqOrigin && new URL(reqOrigin).hostname === url.hostname;
+    const isScopeHoundApp = reqOrigin && /^https:\/\/(www\.)?scopehound\.app$/.test(reqOrigin);
+    const allowedOrigin = (isSameHost || isScopeHoundApp) ? reqOrigin : url.origin;
 
     // CORS preflight
     if (request.method === "OPTIONS") {
@@ -3805,6 +4458,75 @@ export default {
       return jsonResponse(kpis);
     }
 
+    // ── Contact form (public POST, admin GET) ──
+    if (path === "/api/contact" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const name = (body.name || "").trim().slice(0, 200);
+        const email = (body.email || "").trim().slice(0, 200);
+        const message = (body.message || "").trim().slice(0, 2000);
+        if (!name || !email || !message) return jsonResponse({ error: "Name, email, and message are required" }, 400);
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return jsonResponse({ error: "Invalid email address" }, 400);
+        // Rate limit: 5 submissions per IP per hour
+        const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+        const rlKey = "contact_rl:" + ip;
+        const rlData = JSON.parse(await env.STATE.get(rlKey) || "null");
+        const now = Date.now();
+        if (rlData && rlData.count >= 5 && (now - rlData.first) < 3600000) {
+          return jsonResponse({ error: "Too many messages. Please try again later." }, 429);
+        }
+        if (!rlData || (now - rlData.first) >= 3600000) {
+          await env.STATE.put(rlKey, JSON.stringify({ count: 1, first: now }), { expirationTtl: 3600 });
+        } else {
+          await env.STATE.put(rlKey, JSON.stringify({ count: rlData.count + 1, first: rlData.first }), { expirationTtl: 3600 });
+        }
+        const id = crypto.randomUUID();
+        const entry = { id, name, email, message, ip, createdAt: new Date().toISOString(), read: false };
+        await env.STATE.put("contact:" + id, JSON.stringify(entry));
+        const headers = new Headers(SECURITY_HEADERS);
+        headers.set("Access-Control-Allow-Origin", allowedOrigin);
+        return new Response(JSON.stringify({ success: true }), { status: 200, headers: { ...Object.fromEntries(headers), "Content-Type": "application/json" } });
+      } catch (e) {
+        return jsonResponse({ error: "Invalid request" }, 400);
+      }
+    }
+
+    if (path === "/api/admin/contacts") {
+      const adminSession = await getAdminSession(request, env);
+      if (!adminSession) return jsonResponse({ error: "Admin auth required" }, 401);
+      if (request.method === "DELETE") {
+        const id = url.searchParams.get("id");
+        if (id) await env.STATE.delete("contact:" + id);
+        return jsonResponse({ success: true });
+      }
+      // Mark as read
+      if (request.method === "PATCH") {
+        const id = url.searchParams.get("id");
+        if (id) {
+          const raw = await env.STATE.get("contact:" + id);
+          if (raw) {
+            const entry = JSON.parse(raw);
+            entry.read = true;
+            await env.STATE.put("contact:" + id, JSON.stringify(entry));
+          }
+        }
+        return jsonResponse({ success: true });
+      }
+      // List all contacts
+      const contacts = [];
+      let cursor = null;
+      do {
+        const list = await env.STATE.list({ prefix: "contact:", cursor, limit: 100 });
+        for (const key of list.keys) {
+          const raw = await env.STATE.get(key.name);
+          if (raw) contacts.push(JSON.parse(raw));
+        }
+        cursor = list.list_complete ? null : list.cursor;
+      } while (cursor);
+      contacts.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+      return jsonResponse({ contacts });
+    }
+
     // ── Admin: Manual cron trigger (for testing) ──
     if (path === "/api/admin/trigger-cron" && request.method === "POST") {
       const adminSession = await getAdminSession(request, env);
@@ -4001,10 +4723,11 @@ export default {
         const settings = {
           ...existing,
           slackWebhookUrl: body.slackWebhookUrl !== undefined ? (body.slackWebhookUrl || null) : (existing.slackWebhookUrl || null),
-          productHuntToken: body.productHuntToken !== undefined ? (body.productHuntToken || null) : (existing.productHuntToken || null),
           productHuntTopics: body.productHuntTopics !== undefined ? body.productHuntTopics : (existing.productHuntTopics || []),
           announcementKeywords: body.announcementKeywords !== undefined ? body.announcementKeywords : (existing.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS),
           phMinVotes: body.phMinVotes !== undefined ? body.phMinVotes : (existing.phMinVotes ?? 0),
+          radarSubreddits: body.radarSubreddits !== undefined ? body.radarSubreddits : (existing.radarSubreddits || []),
+          _productMeta: body._productMeta !== undefined ? body._productMeta : (existing._productMeta || null),
         };
         await env.STATE.put(prefix + "settings", JSON.stringify(settings));
         return jsonResponse({ success: true });
@@ -4033,8 +4756,31 @@ export default {
       const { user, response } = await resolveAuth(request, env);
       if (response) return response;
       const userId = isHostedMode(env) ? user.id : null;
+
+      // Scout tier: enforce 24hr cooldown on manual scans
+      if (userId) {
+        const tier = (user.tier || "scout").toLowerCase();
+        if (tier === "scout" || tier === "recon") {
+          const cooldownKey = `user_state:${userId}:lastManualScan`;
+          const lastScanRaw = await env.STATE.get(cooldownKey);
+          if (lastScanRaw) {
+            const hoursSince = (Date.now() - new Date(lastScanRaw).getTime()) / (1000 * 60 * 60);
+            if (hoursSince < 24) {
+              const nextScanAt = new Date(new Date(lastScanRaw).getTime() + 24 * 60 * 60 * 1000).toISOString();
+              return jsonResponse({ error: "Scan cooldown active", cooldown: true, nextScanAt, hoursRemaining: Math.ceil(24 - hoursSince) }, 429);
+            }
+          }
+        }
+      }
+
       const config = await loadConfig(env, userId);
       const result = await runMonitor(env, config, userId);
+
+      // Record scan timestamp for cooldown tracking
+      if (userId) {
+        await env.STATE.put(`user_state:${userId}:lastManualScan`, new Date().toISOString());
+      }
+
       const slackOk = result.slackResults.filter(r => r.ok).length;
       const slackErrors = result.slackResults.filter(r => !r.ok).map(r => r.error);
       return jsonResponse({
@@ -4044,6 +4790,22 @@ export default {
         slackMessages: { sent: slackOk, failed: slackErrors.length, errors: slackErrors },
         subrequests: result.subrequests,
       });
+    }
+
+    // ── Scan status (cooldown check for dashboard) ──
+    if (path === "/api/scan/status") {
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
+      const userId = isHostedMode(env) ? user.id : null;
+      const tier = (user.tier || "scout").toLowerCase();
+      const isScout = tier === "scout" || tier === "recon";
+      if (!isScout || !userId) return jsonResponse({ canScan: true, cooldown: false, tier });
+      const lastScanRaw = await env.STATE.get(`user_state:${userId}:lastManualScan`);
+      if (!lastScanRaw) return jsonResponse({ canScan: true, cooldown: false, tier, lastScan: null });
+      const hoursSince = (Date.now() - new Date(lastScanRaw).getTime()) / (1000 * 60 * 60);
+      if (hoursSince >= 24) return jsonResponse({ canScan: true, cooldown: false, tier, lastScan: lastScanRaw });
+      const nextScanAt = new Date(new Date(lastScanRaw).getTime() + 24 * 60 * 60 * 1000).toISOString();
+      return jsonResponse({ canScan: false, cooldown: true, tier, lastScan: lastScanRaw, nextScanAt, hoursRemaining: Math.ceil(24 - hoursSince) });
     }
 
     // ── Config API: Detect RSS ──
@@ -4075,6 +4837,43 @@ export default {
         const seeds = Array.isArray(body.seeds) ? body.seeds.map(s => s.trim()).filter(Boolean) : [];
         const result = await discoverCompetitors(env, compUrl, seeds);
         return jsonResponse(result);
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 400);
+      }
+    }
+
+    // ── Config API: Suggest Subreddits for Radar ──
+    if (path === "/api/config/suggest-subreddits" && request.method === "POST") {
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
+      if (!hasFeature(user.tier || "scout", "competitor_radar")) {
+        return jsonResponse({ error: "Competitor Radar is available on the Command plan." }, 403);
+      }
+      try {
+        const body = await request.json();
+        if (!body.productMeta) return jsonResponse({ error: "productMeta required" }, 400);
+        const result = await suggestSubreddits(env, body.productMeta);
+        // Also save product meta to settings for radar to use later
+        const prefix = isHostedMode(env) ? `user_config:${user.id}:` : "config:";
+        const existingRaw = await env.STATE.get(prefix + "settings");
+        const existing = existingRaw ? JSON.parse(existingRaw) : {};
+        existing._productMeta = { name: body.productMeta.product_name, category: body.productMeta.category, subcategory: body.productMeta.subcategory, keywords: body.productMeta.keywords, target_audience: body.productMeta.target_audience };
+        await env.STATE.put(prefix + "settings", JSON.stringify(existing));
+        return jsonResponse(result || { subreddits: [] });
+      } catch (e) {
+        return jsonResponse({ error: e.message }, 400);
+      }
+    }
+
+    // ── Config API: Suggest PH Topics ──
+    if (path === "/api/config/suggest-ph-topics" && request.method === "POST") {
+      const { user, response } = await resolveAuth(request, env);
+      if (response) return response;
+      try {
+        const body = await request.json();
+        if (!body.productMeta) return jsonResponse({ error: "productMeta required" }, 400);
+        const result = await suggestPHTopics(env, body.productMeta);
+        return jsonResponse(result || { topics: [] });
       } catch (e) {
         return jsonResponse({ error: e.message }, 400);
       }
