@@ -641,8 +641,10 @@ function formatPageChangeAlert(compName, page, analysis, diff, pricingChanges) {
     lines.push("\n_Pricing details:_");
     for (const c of pricingChanges) lines.push(`  • ${c}`);
   }
-  if (diff?.beforeExcerpt) lines.push(`\n_Before:_ ${diff.beforeExcerpt.slice(0, 200)}...`);
-  if (diff?.afterExcerpt) lines.push(`_After:_ ${diff.afterExcerpt.slice(0, 200)}...`);
+  if (!analysis?.summary) {
+    if (diff?.beforeExcerpt) lines.push(`\n_Before:_ ${diff.beforeExcerpt}`);
+    if (diff?.afterExcerpt) lines.push(`_After:_ ${diff.afterExcerpt}`);
+  }
   lines.push(`\n<${page.url}|View page>`);
   return { text: lines.join("\n"), priority };
 }
