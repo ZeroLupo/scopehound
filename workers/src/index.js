@@ -69,6 +69,7 @@ async function loadConfig(env, userId) {
       announcementKeywords: settings.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS,
       phMinVotes: settings.phMinVotes ?? 0,
       radarSubreddits: settings.radarSubreddits || [],
+      slackMinPriority: settings.slackMinPriority || "low",
       _productMeta: settings._productMeta || null,
     },
   };
@@ -431,6 +432,25 @@ async function searchDDG(query) {
     console.log(`[Search] DDG lite: ${results.length} results`);
     return results;
   } catch (e) { console.log(`[Search] DDG lite error: ${e.message}`); return []; }
+}
+
+// ─── BRAVE SEARCH API ─────────────────────────────────────────────────────────
+async function braveSearch(env, query) {
+  if (!env.BRAVE_SEARCH_API_KEY || !canSubrequest()) return [];
+  trackSubrequest();
+  try {
+    const r = await withTimeout(fetch(
+      "https://api.search.brave.com/res/v1/web/search?q=" + encodeURIComponent(query) + "&count=10",
+      { headers: { "X-Subscription-Token": env.BRAVE_SEARCH_API_KEY, Accept: "application/json" } }
+    ), 10000);
+    if (!r.ok) { console.log(`[Brave] HTTP ${r.status}`); return []; }
+    const data = await r.json();
+    return (data.web?.results || []).map(item => ({
+      title: item.title || "",
+      url: item.url || "",
+      snippet: item.description || "",
+    }));
+  } catch (e) { console.log(`[Brave] Error: ${e.message}`); return []; }
 }
 
 function extractPageMeta(html) {
@@ -830,6 +850,355 @@ function formatRadarAlert(radarFinds) {
   return text;
 }
 
+// ─── WEEKLY COMPETITOR SUGGESTIONS (Sonnet, runs every Friday) ───────────────
+
+async function suggestNewCompetitors(env, productMeta, existingCompetitors, previousSuggestions) {
+  if (!productMeta || !(productMeta.product_name || productMeta.name)) return null;
+
+  const existingNames = existingCompetitors.map(c => c.name.toLowerCase());
+  const existingDomains = existingCompetitors.map(c => {
+    try { return new URL(c.website.startsWith("http") ? c.website : "https://" + c.website).hostname.replace(/^www\./, ""); }
+    catch { return ""; }
+  }).filter(Boolean);
+  const previousNames = (previousSuggestions || []).map(s => s.toLowerCase());
+  const allExcluded = [...new Set([...existingNames, ...existingDomains, ...previousNames])];
+
+  const result = await callClaude(env,
+    `You are a competitive intelligence analyst. Suggest 5 real companies that compete with this product.
+
+## Target Product
+- Name: ${productMeta.product_name || productMeta.name}
+- Category: ${productMeta.category}
+- Niche: ${productMeta.subcategory || productMeta.category}
+- Keywords: ${(productMeta.keywords || []).join(", ")}
+- Target customer: ${productMeta.target_audience || "not specified"}
+
+## Already Known (do NOT suggest these)
+${allExcluded.join(", ") || "(none)"}
+
+## Instructions
+- Suggest 5 REAL companies/products that compete with ${productMeta.product_name || productMeta.name}
+- Include their actual website URL (must be a real, working domain)
+- Include a one-sentence description of what the company does
+- Prioritize niche direct competitors and newer/bootstrapped players — not just big incumbents
+- Include companies you'd find discussed on Reddit, Product Hunt, Hacker News, or niche forums
+- Do NOT include any company from the "Already Known" list
+- Do NOT include generic platforms (AWS, Google Cloud) unless they have a directly competing product
+
+Return JSON only:
+{"suggestions":[{"name":"Company Name","url":"https://example.com","description":"One sentence describing what they do","overlap":"direct or adjacent or broader"}]}
+If you cannot think of any real competitors, return: {"suggestions":[]}`,
+    { model: "claude-sonnet-4-5-20250929", maxTokens: 800 }
+  );
+
+  if (!result?.suggestions) return null;
+
+  // Post-filter: remove any that match existing competitors
+  const filtered = result.suggestions.filter(s => {
+    const lowerName = s.name.toLowerCase();
+    let domain = "";
+    try { domain = new URL(s.url).hostname.replace(/^www\./, ""); } catch {}
+    return !allExcluded.some(ex => lowerName.includes(ex) || ex.includes(lowerName) || (domain && ex === domain));
+  });
+
+  return filtered.slice(0, 5);
+}
+
+// ─── DEEP COMPETITOR DISCOVERY (1st Friday of month, Brave Search + Sonnet) ──
+
+// Helper: extract registrable domain (strips subdomains except known platforms)
+const PLATFORM_SUFFIXES = ["github.io", "netlify.app", "vercel.app", "herokuapp.com", "pages.dev", "workers.dev", "fly.dev"];
+function getRegistrableDomain(hostname) {
+  const h = hostname.replace(/^www\./, "");
+  if (PLATFORM_SUFFIXES.some(s => h.endsWith(s))) return h;
+  const parts = h.split(".");
+  return parts.length > 2 ? parts.slice(-2).join(".") : h;
+}
+
+async function enrichProductMeta(env, productMeta, productUrl) {
+  if (!productMeta || !(productMeta.product_name || productMeta.name)) return productMeta;
+
+  // Fetch homepage live
+  let pageTitle = "";
+  let pageMetaDesc = "";
+  let homepageContext = "";
+  if (productUrl) {
+    const html = await fetchUrl(productUrl);
+    if (html && html.length > 200) {
+      const meta = extractPageMeta(html);
+      pageTitle = meta.title;
+      pageMetaDesc = meta.metaDesc;
+      // Diff check: if title + meta desc unchanged, reuse cached enrichment
+      if (productMeta.adjacent_categories &&
+          productMeta._lastTitle === pageTitle &&
+          productMeta._lastMetaDesc === pageMetaDesc) {
+        console.log("[Enrich] Site unchanged, reusing cached enrichment");
+        return productMeta;
+      }
+      homepageContext = [
+        meta.title && `Page title: ${meta.title}`,
+        meta.metaDesc && `Meta description: ${meta.metaDesc}`,
+        meta.ogDesc && `OG description: ${meta.ogDesc}`,
+        meta.headings.length && `Key headings: ${meta.headings.join(" | ")}`,
+        `\nHomepage excerpt:\n${extractBodyText(html).slice(0, 2000)}`,
+      ].filter(Boolean).join("\n");
+    } else {
+      console.log("[Enrich] Homepage fetch failed or too short, falling back to cached data");
+      if (productMeta.adjacent_categories) return productMeta;
+    }
+  }
+
+  // Sonnet call: product decomposition
+  const productName = productMeta.product_name || productMeta.name;
+  const prompt = `You are a product analyst. Decompose this product into its functional building blocks.
+
+## Product
+- Name: ${productName}
+- Category: ${productMeta.category || "unknown"}
+- Subcategory: ${productMeta.subcategory || productMeta.category || "unknown"}
+${homepageContext ? `\n## Homepage Content\n${homepageContext}` : ""}
+
+Return a JSON object with these fields:
+{
+  "adjacent_categories": ["related categories a competitor might use instead — e.g. if this is 'affiliate marketing', include 'influencer platform', 'creator outreach', 'partnership automation'. Be expansive — 5-8 labels"],
+  "core_workflow": ["step 1 the user takes", "step 2", "step 3", "step 4"],
+  "delivery_model": "self-serve SaaS | managed service | marketplace | API | hybrid",
+  "partner_types": ["affiliates", "influencers", "creators", etc.],
+  "category_labels": ["how they describe themselves — e.g. 'affiliate marketing platform'"]
+}
+
+IMPORTANT: The "adjacent_categories" field is critical. Think about what OTHER labels a product with the same core workflow might use. A tool that automates partner outreach might call itself an affiliate recruitment tool, an influencer marketing platform, a creator partnership platform, an AI outreach agent, or a partner discovery tool. Be expansive.
+
+Return JSON only, no markdown.`;
+
+  const result = await callClaude(env, prompt, { model: "claude-sonnet-4-5-20250929", maxTokens: 600 });
+  if (!result) {
+    console.log("[Enrich] Sonnet call failed, keeping existing productMeta");
+    return productMeta;
+  }
+
+  // Merge enriched fields into existing productMeta
+  const enriched = {
+    ...productMeta,
+    adjacent_categories: result.adjacent_categories || [],
+    core_workflow: result.core_workflow || [],
+    delivery_model: result.delivery_model || "",
+    partner_types: result.partner_types || [],
+    category_labels: result.category_labels || [],
+    _lastTitle: pageTitle,
+    _lastMetaDesc: pageMetaDesc,
+    _lastEnriched: new Date().toISOString(),
+  };
+  console.log(`[Enrich] Product decomposed: ${(enriched.adjacent_categories || []).length} adjacent categories, ${(enriched.core_workflow || []).length} workflow steps`);
+  return enriched;
+}
+
+async function deepCompetitorDiscovery(env, productMeta, existingCompetitors, previousSuggestions) {
+  const productName = productMeta.product_name || productMeta.name;
+  if (!productName) return null;
+
+  // ── a) Build exclusion list ──
+  const existingNames = existingCompetitors.map(c => c.name.toLowerCase());
+  const existingDomains = existingCompetitors.map(c => {
+    try { return getRegistrableDomain(new URL(c.website.startsWith("http") ? c.website : "https://" + c.website).hostname); }
+    catch { return ""; }
+  }).filter(Boolean);
+  const previousNames = (previousSuggestions || []).map(s => s.toLowerCase());
+  const allExcluded = [...new Set([...existingNames, ...existingDomains, ...previousNames])];
+
+  // ── b) Sonnet call #1: Generate 15 search queries ──
+  const landscapeContext = existingCompetitors.slice(0, 10).map(c => c.name).join(", ");
+  const adjacentCats = (productMeta.adjacent_categories || []).join(", ");
+  const coreWorkflow = (productMeta.core_workflow || []).join(" → ");
+  const categoryLabels = (productMeta.category_labels || [productMeta.category]).join(", ");
+  const partnerTypes = (productMeta.partner_types || []).join(", ");
+
+  const queryResult = await callClaude(env,
+    `You are a competitive intelligence researcher. Generate search queries to find competitors — especially smaller, adjacent, or differently-labeled ones.
+
+## Target Product
+- Name: ${productName}
+- Category: ${productMeta.category || "unknown"}
+- Adjacent categories: ${adjacentCats || "unknown"}
+- Core workflow: ${coreWorkflow || "unknown"}
+- Partner types: ${partnerTypes || "unknown"}
+- Known competitors: ${landscapeContext || "(none)"}
+
+Generate exactly 15 search queries across these 5 categories (3 each):
+
+A. Direct category searches — using category labels and adjacent categories
+B. Workflow-match searches — describe WHAT the product does functionally, no category labels
+C. Startup discovery searches — target Product Hunt, "[competitor] alternatives", "best new [category] startups 2025 2026"
+D. Buyer-perspective searches — what a potential buyer would search
+E. Anti-incumbent searches — "[big player] alternative for [smaller use case]"
+
+RULES:
+- Keep queries short: 2-6 words perform best
+- Every query must be meaningfully different
+- Prioritize queries that surface STARTUPS and SMALL TOOLS
+- Include at least 2 queries that don't use any standard category term
+- Do not use quotes or boolean operators except in category C (site: is OK)
+
+Return JSON only, no markdown:
+{"queries":[{"query":"the search query","category":"A|B|C|D|E"}]}`,
+    { model: "claude-sonnet-4-5-20250929", maxTokens: 800 }
+  );
+
+  if (!queryResult?.queries || queryResult.queries.length === 0) {
+    console.log("[Deep] Query generation failed, aborting");
+    return null;
+  }
+  console.log(`[Deep] Generated ${queryResult.queries.length} search queries`);
+
+  // ── c) Execute searches via Brave API ──
+  const allSearchResults = [];
+  for (const q of queryResult.queries.slice(0, 15)) {
+    if (!canSubrequest()) { console.log("[Deep] Subrequest budget low, stopping searches"); break; }
+    const results = await braveSearch(env, q.query);
+    for (const r of results) {
+      r._queryCategory = q.category;
+    }
+    allSearchResults.push(...results);
+  }
+  console.log(`[Deep] Search returned ${allSearchResults.length} raw results`);
+
+  // ── d) JS dedup + filter ──
+  const seenDomains = new Set();
+  const keywordPool = [
+    ...(productMeta.category_labels || [productMeta.category]),
+    ...(productMeta.adjacent_categories || []),
+    ...(productMeta.keywords || []),
+  ].map(k => k.toLowerCase()).filter(Boolean);
+
+  const dedupedCandidates = allSearchResults.filter(r => {
+    try {
+      const hostname = new URL(r.url).hostname.replace(/^www\./, "");
+      const regDomain = getRegistrableDomain(hostname);
+      if (seenDomains.has(regDomain)) return false;
+      if (SEARCH_FILTER.some(b => hostname.includes(b))) return false;
+      if (allExcluded.some(ex => regDomain === ex || regDomain.includes(ex))) return false;
+      seenDomains.add(regDomain);
+      return true;
+    } catch { return false; }
+  });
+
+  // Pre-filter: check keyword overlap in snippet (drop zero-overlap candidates)
+  const filteredCandidates = dedupedCandidates.filter(r => {
+    if (keywordPool.length === 0) return true;
+    const snippetLower = (r.title + " " + r.snippet).toLowerCase();
+    return keywordPool.some(kw => snippetLower.includes(kw));
+  }).slice(0, 15);
+
+  console.log(`[Deep] After dedup + keyword filter: ${filteredCandidates.length} candidates (from ${dedupedCandidates.length} deduped)`);
+  if (filteredCandidates.length === 0) return null;
+
+  // ── e) Fetch top 10 candidate homepages in parallel ──
+  const toFetch = filteredCandidates.slice(0, 10);
+  const fetchPromises = toFetch.map(c => fetchUrl(c.url).catch(() => null));
+  const fetchResults = await Promise.allSettled(fetchPromises);
+
+  for (let i = 0; i < toFetch.length; i++) {
+    const result = fetchResults[i];
+    if (result.status === "fulfilled" && result.value) {
+      const bodyText = extractBodyText(result.value).slice(0, 800);
+      toFetch[i]._homepageText = bodyText.length >= 100 ? bodyText : null;
+    }
+    // Fallback: if homepage text is empty/short, use Brave snippet
+    if (!toFetch[i]._homepageText) {
+      toFetch[i]._homepageText = null; // will use snippet in prompt
+    }
+  }
+
+  // ── f) Sonnet call #2: Score + rank candidates ──
+  const candidateDescriptions = toFetch.map((c, i) => {
+    const context = c._homepageText || `(Homepage unavailable. Search snippet: ${c.snippet})`;
+    const discoveryLabel = { A: "direct search", B: "workflow match", C: "startup discovery", D: "buyer search", E: "anti-incumbent" };
+    return `${i + 1}. ${c.title}\n   URL: ${c.url}\n   Found via: ${discoveryLabel[c._queryCategory] || "search"}\n   Context: ${context}`;
+  }).join("\n\n");
+
+  const scoringResult = await callClaude(env,
+    `You are a competitive analyst. Score each candidate product on how much they compete with the target.
+
+## Target Product
+- Name: ${productName}
+- Category: ${categoryLabels}
+- Core workflow: ${coreWorkflow}
+- Partner types: ${partnerTypes}
+- Target customer: ${productMeta.target_audience || "not specified"}
+
+## Candidates
+${candidateDescriptions}
+
+## Scoring (0-3 each, max 18)
+1. workflow_overlap: Same core workflow automated? (3=both discovery+outreach, 0=different workflow)
+2. ai_depth: AI as core differentiator? (3=AI-first, 0=manual tool)
+3. buyer_overlap: Same buyer persona? (3=same persona+size, 0=different buyer)
+4. partner_type_overlap: Same partner types? (3=same, 0=different ecosystem)
+5. price_scale_match: Similar pricing/scale? (3=similar, 0=completely different tier)
+6. substitutability: Could a buyer choose this INSTEAD? (3=direct substitute, 0=not a substitute)
+
+## Classification
+- direct (14-18): Nearly identical value prop and buyer
+- adjacent (9-13): Overlapping workflow, different angle or category label
+- tangential (5-8): Related space, weak substitutability
+- not_competitor (0-4): Different product, exclude
+
+IMPORTANT: "Adjacent" competitors (9-13) are the MOST VALUABLE output. Do NOT penalize for using a different category label.
+
+Return JSON only, no markdown:
+{"candidates":[{"name":"Product Name","url":"https://...","total_score":0,"competitor_type":"direct|adjacent|tangential|not_competitor","description":"What they do, one sentence","differentiator":"How they differ from ${productName}, one sentence","discovery_method":"direct search|workflow match|startup discovery|buyer search|anti-incumbent"}]}`,
+    { model: "claude-sonnet-4-5-20250929", maxTokens: 1500 }
+  );
+
+  if (!scoringResult?.candidates) {
+    console.log("[Deep] Scoring failed");
+    return null;
+  }
+
+  // ── g) Post-filter + return ──
+  const scored = scoringResult.candidates.filter(c => {
+    if (!c.name || !c.url || c.total_score < 9) return false;
+    const lowerName = c.name.toLowerCase();
+    let domain = "";
+    try { domain = getRegistrableDomain(new URL(c.url).hostname); } catch {}
+    return !allExcluded.some(ex => lowerName.includes(ex) || ex.includes(lowerName) || (domain && ex === domain));
+  });
+
+  scored.sort((a, b) => (b.total_score || 0) - (a.total_score || 0));
+  const topResults = scored.slice(0, 5).map(c => ({
+    name: c.name,
+    url: c.url,
+    description: c.description || "",
+    overlap: c.competitor_type === "direct" ? "direct" : c.competitor_type === "adjacent" ? "adjacent" : "broader",
+    score: c.total_score,
+    differentiator: c.differentiator || "",
+    discovery_method: c.discovery_method || "",
+  }));
+
+  console.log(`[Deep] Final: ${topResults.length} competitors (from ${scoringResult.candidates.length} scored)`);
+  return topResults.length > 0 ? topResults : null;
+}
+
+function formatWeeklySuggestions(suggestions, productMeta, tier) {
+  const productName = productMeta.product_name || productMeta.name || "your product";
+  const overlapEmoji = { direct: "\u{1F534}", adjacent: "\u{1F7E1}", broader: "\u{1F535}" };
+  let text = `\u{1F50D} *Weekly Competitor Discovery*\n_New competitors to consider for ${productName}_\n`;
+  for (const s of suggestions) {
+    const emoji = overlapEmoji[s.overlap] || "\u{1F7E1}";
+    let domain = "";
+    try { domain = new URL(s.url).hostname.replace(/^www\./, ""); } catch { domain = s.url; }
+    text += `\n>${emoji} *${s.name}* \u2014 ${domain}\n>${s.description}`;
+    if (s.differentiator) text += `\n>_${s.differentiator}_`;
+    if (s.discovery_method) text += `\n>_(found via ${s.discovery_method})_`;
+    text += `\n>\`/scopehound add ${s.url}\`\n`;
+  }
+  if (tier === "scout" || tier === "recon") {
+    text += `\n_\u2B50 Upgrade to Operator for daily automated monitoring \u2192 /billing_\n`;
+  }
+  text += `\n_Suggestions powered by AI_`;
+  return text;
+}
+
 // ─── PRICING COMPARISON ─────────────────────────────────────────────────────
 
 function comparePricing(oldPricing, newPricing) {
@@ -1079,7 +1448,7 @@ JSON only:
 
 async function fetchMetaAds(domain, companyName, metaToken, env) {
   // Check cache first (6 hour TTL)
-  const cacheKey = "ads:meta:" + domain;
+  const cacheKey = "ads:meta:" + (domain || companyName);
   const cached = await env.STATE.get(cacheKey);
   if (cached) return JSON.parse(cached);
 
@@ -1170,11 +1539,11 @@ function formatAdsBlocks(domain, companyName, metaData) {
   // Google section
   blocks.push({
     type: "section",
-    text: { type: "mrkdwn", text: "*🔍 Google Ads* — Check transparency center" },
+    text: { type: "mrkdwn", text: domain ? "*🔍 Google Ads* — Check transparency center" : `*🔍 Google Ads* — Search for "${name}" on the transparency center` },
     accessory: {
       type: "button",
-      text: { type: "plain_text", text: "View", emoji: true },
-      url: `https://adstransparency.google.com/?domain=${encodeURIComponent(domain)}`,
+      text: { type: "plain_text", text: domain ? "View" : "Open", emoji: true },
+      url: domain ? `https://adstransparency.google.com/?domain=${encodeURIComponent(domain)}` : `https://adstransparency.google.com/`,
     },
   });
 
@@ -1486,11 +1855,22 @@ async function runMonitor(env, configOverride, userId) {
   const slackResults = [];
   console.log(`\nSlack URL: ${slackUrl ? "configured" : "MISSING"}`);
   if (alerts.length > 0) {
-    console.log(`Sending ${alerts.length} alert(s) to Slack (batched)...`);
-    const parts = [formatDigestHeader(alerts)];
-    const high = alerts.filter((a) => a.priority === "high");
-    const medium = alerts.filter((a) => a.priority === "medium");
-    const low = alerts.filter((a) => a.priority === "low");
+    // Filter alerts by user's minimum priority preference
+    const minPriority = settings.slackMinPriority || "low";
+    const priorityRank = { high: 3, medium: 2, low: 1 };
+    const minRank = priorityRank[minPriority] || 1;
+    const filtered = alerts.filter(a => (priorityRank[a.priority] || 1) >= minRank);
+    const skipped = alerts.length - filtered.length;
+    if (skipped > 0) console.log(`Filtered ${skipped} alert(s) below ${minPriority} priority`);
+    if (filtered.length === 0) {
+      console.log("All alerts filtered out by priority preference — skipping Slack message.");
+    } else {
+    console.log(`Sending ${filtered.length} alert(s) to Slack (batched)...`);
+    const parts = [formatDigestHeader(filtered)];
+    if (skipped > 0) parts[0] += ` _(${skipped} lower-priority update${skipped > 1 ? "s" : ""} filtered)_`;
+    const high = filtered.filter((a) => a.priority === "high");
+    const medium = filtered.filter((a) => a.priority === "medium");
+    const low = filtered.filter((a) => a.priority === "low");
     for (const a of high) parts.push(a.text);
     for (const a of medium) parts.push(a.text);
     if (low.length > 0) parts.push(low.map((a) => a.text).join("\n\n---\n\n"));
@@ -1498,24 +1878,14 @@ async function runMonitor(env, configOverride, userId) {
     let message = parts.join("\n\n───────────────────\n\n");
     if (message.length > 38000) message = message.slice(0, 38000) + "\n\n_(message truncated — view full details on your dashboard)_";
     slackResults.push(await sendSlack(slackUrl, message));
+    }
   } else {
     console.log("\nNo changes detected.");
     const totalPages = competitors.reduce((n, c) => n + (c.pages?.length || 0), 0);
     const totalBlogs = competitors.filter(c => c.blogRss).length;
-    // Calculate next scan time based on tier
-    const CRON_SLOTS = [3, 9, 15, 21];
-    const OPERATOR_SLOTS_MSG = [9, 21];
-    const nowHour = new Date().getUTCHours();
-    let nextSlot;
-    const slotsForTier = (userTier === "operator") ? OPERATOR_SLOTS_MSG : (userTier === "scout" || userTier === "recon") ? [] : CRON_SLOTS;
-    if (slotsForTier.length > 0) {
-      nextSlot = slotsForTier.find(s => s > nowHour);
-      if (nextSlot === undefined) nextSlot = slotsForTier[0];
-      const hoursUntil = nextSlot > nowHour ? nextSlot - nowHour : (24 - nowHour + nextSlot);
-      var nextScanText = `Next scan in ~${hoursUntil}h.`;
-    } else {
-      var nextScanText = "Manual scan available once per 24h.";
-    }
+    // Next scan messaging
+    const hasScheduled = userTier && userTier !== "scout" && userTier !== "recon";
+    var nextScanText = hasScheduled ? "Next scan tomorrow at 9:00 AM UTC." : "Manual scan available once per 24h.";
     // Build itemized source list
     const sources = [`${competitors.length} competitors (${totalPages} pages)`];
     if (totalBlogs > 0) sources.push(`${totalBlogs} blog RSS feed${totalBlogs > 1 ? "s" : ""}`);
@@ -2778,11 +3148,11 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <div id="successMsg"></div>
 <div class="current" id="currentPlan"><div><div class="current-plan" id="planName">Loading...</div><div class="current-status" id="planStatus"></div></div></div>
 <h2>Plans</h2>
-<div style="text-align:center;margin-bottom:16px"><label style="display:inline-block;vertical-align:middle;margin:0 8px;width:40px;height:22px;position:relative;cursor:pointer"><input type="checkbox" id="billingToggle" style="display:none" onchange="toggleBilling()"><span style="position:absolute;inset:0;background:#2a3038;border-radius:11px;transition:0.3s"></span><span id="toggleDot" style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#d4d8de;border-radius:50%;transition:0.3s"></span></label><span style="font-size:12px;color:#6b7280">Annual <span style="color:#5c6b3c;font-weight:700">Save 17%</span></span></div>
+<div style="text-align:center;margin-bottom:16px;display:flex;align-items:center;justify-content:center;gap:12px"><span id="monthlyLabel" style="font-size:12px;font-weight:600;color:#d4d8de;cursor:pointer" onclick="document.getElementById('billingToggle').checked=false;toggleBilling()">Monthly</span><label style="display:inline-block;vertical-align:middle;width:40px;height:22px;position:relative;cursor:pointer" onclick="var cb=document.getElementById('billingToggle');cb.checked=!cb.checked;toggleBilling()"><input type="checkbox" id="billingToggle" style="opacity:0;position:absolute;width:0;height:0;pointer-events:none"><span style="position:absolute;inset:0;background:#2a3038;border-radius:11px;transition:0.3s"></span><span id="toggleDot" style="position:absolute;top:3px;left:3px;width:16px;height:16px;background:#d4d8de;border-radius:50%;transition:0.3s"></span></label><span id="annualLabel" style="font-size:12px;color:#6b7280;cursor:pointer" onclick="document.getElementById('billingToggle').checked=true;toggleBilling()">Annual <span style="color:#5c6b3c;font-weight:700">Save 17%</span></span></div>
 <div class="grid" style="grid-template-columns:repeat(3,1fr)">
 <div class="plan" data-tier="scout"><div class="plan-name">Scout</div><div class="plan-price" data-monthly="29" data-annual="290">$29<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Manual scans only</li><li>30-day history</li><li>Dashboard + Slack alerts</li></ul><button class="btn btn-primary" id="btn-scout" onclick="checkout('scout')">Subscribe</button></div>
-<div class="plan" data-tier="operator" style="border-color:#5c6b3c;position:relative"><div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#5c6b3c;color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;padding:2px 10px;border-radius:2px">Recommended</div><div class="plan-name">Operator</div><div class="plan-price" data-monthly="79" data-annual="790">$79<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>2x daily scans</li><li>1-year history</li><li>AI competitor discovery</li><li>RSS/blog monitoring</li><li>/scan + /ads commands</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Subscribe</button></div>
-<div class="plan" data-tier="command"><div class="plan-name">Command</div><div class="plan-price" data-monthly="199" data-annual="1990">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>4x daily scans</li><li>Unlimited history</li><li>Everything in Operator</li><li>Priority scan queue</li><li>Competitor Radar (soon)</li></ul><button class="btn btn-primary" id="btn-command" onclick="checkout('command')">Subscribe</button></div>
+<div class="plan" data-tier="operator" style="border-color:#5c6b3c;position:relative"><div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#5c6b3c;color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;padding:2px 10px;border-radius:2px">Recommended</div><div class="plan-name">Operator</div><div class="plan-price" data-monthly="79" data-annual="790">$79<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>Daily automated scans</li><li>1-year history</li><li>AI competitor discovery</li><li>RSS/blog monitoring</li><li>/scan + /ads commands</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Subscribe</button></div>
+<div class="plan" data-tier="command"><div class="plan-name">Command</div><div class="plan-price" data-monthly="199" data-annual="1990">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>Daily automated scans</li><li>Unlimited history</li><li>Everything in Operator</li><li>Priority scan queue</li><li>Competitor Radar (soon)</li></ul><button class="btn btn-primary" id="btn-command" onclick="checkout('command')">Subscribe</button></div>
 </div>
 <div class="manage" id="manageSection" style="display:none"><a href="#" onclick="manageSubscription();return false">Manage subscription on Stripe</a></div>
 </div>
@@ -2793,7 +3163,12 @@ function toggleBilling(){
   const on=document.getElementById("billingToggle").checked;
   billingPeriod=on?"annual":"monthly";
   document.getElementById("toggleDot").style.left=on?"21px":"3px";
-  document.getElementById("toggleDot").parentElement.previousElementSibling.style.background=on?"#5c6b3c":"#2a3038";
+  const track=document.getElementById("toggleDot").parentElement.querySelector("span");
+  if(track)track.style.background=on?"#5c6b3c":"#2a3038";
+  document.getElementById("monthlyLabel").style.color=on?"#6b7280":"#d4d8de";
+  document.getElementById("monthlyLabel").style.fontWeight=on?"400":"600";
+  document.getElementById("annualLabel").style.color=on?"#d4d8de":"#6b7280";
+  document.getElementById("annualLabel").style.fontWeight=on?"600":"400";
   document.querySelectorAll(".plan-price").forEach(el=>{
     const m=el.dataset.monthly,a=el.dataset.annual;
     if(on){el.innerHTML="$"+a+'<span class="mo">/yr</span>';}
@@ -2968,7 +3343,7 @@ Add to Slack
 <div class="nav-btns">
 <div></div>
 <div style="display:flex;gap:8px;align-items:center">
-<a href="#" onclick="skipSlack();return false" style="font-size:12px;color:#6b7280" id="skipLink">Skip for now</a>
+<button type="button" onclick="skipSlack()" style="font-size:12px;color:#6b7280;cursor:pointer;background:none;border:none;padding:0;font-family:inherit" id="skipLink">Skip for now</button>
 <button class="btn btn-primary" id="slackNext" onclick="goStep(2)">Next</button>
 </div>
 </div>
@@ -3071,6 +3446,11 @@ async function loadUserInfo(){
   }
   if(c.settings&&c.settings.radarSubreddits&&c.settings.radarSubreddits.length>0){
     window._radarSubreddits=c.settings.radarSubreddits;
+    renderRadarSubs(c.settings.radarSubreddits.map(s=>({name:s,reason:"Configured"})));
+  }
+  // Show PH/Reddit section if any data exists or competitors are loaded
+  if(window._phTopics.length>0||window._radarSubreddits.length>0||(c.competitors&&c.competitors.length>0)){
+    showRadarSection();
   }
   // Auto-advance past Slack if already connected
   if(slackVerified)goStep(2);
@@ -3273,7 +3653,7 @@ function renderReview(){
   const ready=competitors.filter(c=>c.name&&c.website);
   const totalPages=ready.reduce((s,c)=>s+c.pages.length,0);
   document.getElementById("reviewSummary").innerHTML=
-    '<div class="review-item"><span class="review-label">Slack</span><span>Connected</span></div>'
+    '<div class="review-item"><span class="review-label">Slack</span><span>'+(slackVerified?"Connected":"<span style='color:#c4a747'>Skipped — configure later in Settings</span>")+'</span></div>'
     +'<div class="review-item"><span class="review-label">Competitors</span><span>'+ready.length+'</span></div>'
     +'<div class="review-item"><span class="review-label">Pages monitored</span><span>'+totalPages+'</span></div>'
     +'<div class="review-item"><span class="review-label">Product Hunt</span><span>'+(window._phTopics.length>0?window._phTopics.map(t=>t.name).join(", "):"Not configured")+'</span></div>'
@@ -3289,6 +3669,12 @@ function showRadarSection(){
   document.getElementById("suggestPHBtn").style.display="inline-block";
   if(window._tier==="command"){
     document.getElementById("suggestSubsBtn").style.display="inline-block";
+  }else{
+    document.getElementById("radarMsg").innerHTML='<div style="font-size:12px;color:#6b7280;padding:8px 0">Auto-suggest available on the <a href="/billing" style="color:#7a8c52">Command plan</a>. You can still add subreddits manually below.</div>';
+  }
+  // Always show manual add input if no subs rendered yet
+  if(window._radarSubreddits.length===0){
+    document.getElementById("radarSubs").innerHTML='<div style="margin-top:4px;display:flex;align-items:center;gap:8px"><span style="color:#6b7280;font-size:14px;white-space:nowrap">r /</span><input type="text" id="customSubreddit" placeholder="affiliatemarketing" style="flex:1"><button class="btn btn-secondary btn-sm" onclick="addCustomSub()">Add</button></div>'+'<div style="font-size:11px;color:#6b7280;margin-top:4px">Just the subreddit name (we strip r/ and full URLs automatically)</div>';
   }
   // Auto-suggest if we have product meta
   if(window._productMeta){
@@ -3318,19 +3704,19 @@ function renderPHTopics(topics){
       +'<input type="checkbox" checked id="phCheck'+i+'" onchange="updatePHSelection()">'
       +'<div><strong style="color:#c4a747">'+esc(t.name)+'</strong>'
       +'<div style="font-size:12px;color:#6b7280">'+esc(t.reason||t.slug)+'</div></div></div>';
-  }).join("")
-  +'<div style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="text" id="customPHTopic" placeholder="e.g. developer-tools" style="flex:1"><button class="btn btn-secondary btn-sm" onclick="addCustomPH()">Add</button></div>'
-  +'<div style="font-size:11px;color:#6b7280;margin-top:4px">PH topic slug (lowercase, hyphenated)</div>';
+  }).join("") +
+  '<div style="margin-top:12px;display:flex;align-items:center;gap:8px"><input type="text" id="customPHTopic" placeholder="e.g. developer-tools" style="flex:1"><button class="btn btn-secondary btn-sm" onclick="addCustomPH()">Add</button></div>' +
+  '<div style="font-size:11px;color:#6b7280;margin-top:4px">PH topic slug (lowercase, hyphenated)</div>';
 }
 function updatePHSelection(){
   const checks=document.querySelectorAll("[id^=phCheck]");
   const labels=document.querySelectorAll("#phTopics strong");
   window._phTopics=[];
-  checks.forEach((cb,i)=>{if(cb.checked&&labels[i]){const name=labels[i].textContent;window._phTopics.push({slug:name.toLowerCase().replace(/\s+/g,"-"),name});}});
+  checks.forEach((cb,i)=>{if(cb.checked&&labels[i]){const name=labels[i].textContent;window._phTopics.push({slug:name.toLowerCase().replace(/\\s+/g,"-"),name});}});
 }
 function addCustomPH(){
   const inp=document.getElementById("customPHTopic");
-  let slug=inp.value.trim().toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9-]/g,"");
+  let slug=inp.value.trim().toLowerCase().replace(/\\s+/g,"-").replace(/[^a-z0-9-]/g,"");
   if(!slug)return;
   const name=slug.split("-").map(w=>w[0].toUpperCase()+w.slice(1)).join(" ");
   window._phTopics.push({slug,name});
@@ -3365,9 +3751,9 @@ function renderRadarSubs(subs){
       +'<input type="checkbox" checked id="radarCheck'+i+'" onchange="updateRadarSelection()">'
       +'<div><strong style="color:#7a8c52">r/'+esc(s.name)+'</strong>'
       +'<div style="font-size:12px;color:#6b7280">'+esc(s.reason)+'</div></div></div>';
-  }).join("")
-  +'<div style="margin-top:12px;display:flex;align-items:center;gap:8px"><span style="color:#6b7280;font-size:14px;white-space:nowrap">r /</span><input type="text" id="customSubreddit" placeholder="affiliatemarketing" style="flex:1"><button class="btn btn-secondary btn-sm" onclick="addCustomSub()">Add</button></div>'
-  +'<div style="font-size:11px;color:#6b7280;margin-top:4px">Just the subreddit name (we strip r/ and full URLs automatically)</div>';
+  }).join("") +
+  '<div style="margin-top:12px;display:flex;align-items:center;gap:8px"><span style="color:#6b7280;font-size:14px;white-space:nowrap">r /</span><input type="text" id="customSubreddit" placeholder="affiliatemarketing" style="flex:1"><button class="btn btn-secondary btn-sm" onclick="addCustomSub()">Add</button></div>' +
+  '<div style="font-size:11px;color:#6b7280;margin-top:4px">Just the subreddit name (we strip r/ and full URLs automatically)</div>';
 }
 function updateRadarSelection(){
   const allSubs=document.querySelectorAll("[id^=radarCheck]");
@@ -3379,7 +3765,7 @@ function addCustomSub(){
   const inp=document.getElementById("customSubreddit");
   let name=inp.value.trim();
   // Accept: "affiliatemarketing", "r/affiliatemarketing", "https://reddit.com/r/affiliatemarketing", etc.
-  name=name.replace(/^https?:\/\/(www\.)?reddit\.com\/r\//i,"").replace(/^r\//i,"").replace(/\/.*$/,"").trim();
+  name=name.replace(/^https?:\\/\\/(www\\.)?reddit\\.com\\/r\\//i,"").replace(/^r\\//i,"").replace(/\\/.*$/,"").trim();
   if(!name)return;
   window._radarSubreddits.push(name);
   const el=document.getElementById("radarSubs");
@@ -3855,9 +4241,7 @@ fetch("/api/admin/contacts").then(r=>r.json()).then(d=>{
 
 export default {
   async scheduled(event, env, ctx) {
-    const slot = new Date(event.scheduledTime).getUTCHours(); // 3, 9, 15, or 21
-    const OPERATOR_SLOTS = [9, 21];
-    // Command runs all 4 slots (3, 9, 15, 21)
+    // Cron runs once daily at 9am UTC for all paying tiers (Scout: manual only)
 
     if (isHostedMode(env)) {
       ctx.waitUntil((async () => {
@@ -3899,6 +4283,9 @@ export default {
           console.log(`Global scan failed: ${e.message}`);
         }
 
+        const isFriday = new Date().getUTCDay() === 5;
+        const isFirstFriday = isFriday && new Date().getUTCDate() <= 7;
+
         for (const userId of list) {
           try {
             const uRaw = await env.STATE.get("user:" + userId);
@@ -3907,18 +4294,71 @@ export default {
             if (user.subscriptionStatus !== "active") continue;
             const tier = user.tier || "scout";
 
+            // ── Weekly Competitor Suggestions (every Friday, ALL tiers) ──
+            if (isFriday) {
+              try {
+                const config = await loadConfig(env, userId);
+                const { competitors, settings } = config;
+                if (settings._productMeta && settings.slackWebhookUrl) {
+                  const suggestKey = `user_state:${userId}:weekly_suggestions`;
+                  const prevRaw = await env.STATE.get(suggestKey);
+                  const prevData = prevRaw ? JSON.parse(prevRaw) : { suggested: [], lastRun: null };
+                  // Rolling 3-month window: only exclude suggestions from last 90 days
+                  const now = Date.now();
+                  const recentSuggested = (prevData.suggested || []).filter(s => {
+                    if (typeof s === "string") return true; // legacy format, keep
+                    return s.date && (now - new Date(s.date).getTime()) < 90 * 24 * 60 * 60 * 1000;
+                  }).map(s => typeof s === "string" ? s : s.name);
+
+                  let suggestions;
+                  if (isFirstFriday && env.BRAVE_SEARCH_API_KEY) {
+                    // Deep chain: enrich + Brave search + scoring (1st Friday of month)
+                    console.log(`Running deep competitor discovery for ${user.email}`);
+                    const productUrl = competitors[0]?.website ? null : null; // user's own product URL not stored; enrich from metadata
+                    const enriched = await enrichProductMeta(env, settings._productMeta, productUrl);
+                    if (enriched !== settings._productMeta) {
+                      // Save enriched productMeta back to KV
+                      const settingsKey = `user_config:${userId}:settings`;
+                      const settRaw = await env.STATE.get(settingsKey);
+                      const fullSettings = settRaw ? JSON.parse(settRaw) : {};
+                      fullSettings._productMeta = enriched;
+                      await env.STATE.put(settingsKey, JSON.stringify(fullSettings));
+                    }
+                    suggestions = await deepCompetitorDiscovery(env, enriched, competitors, recentSuggested);
+                  } else {
+                    // Light mode: single Sonnet call (other Fridays or no Brave key)
+                    suggestions = await suggestNewCompetitors(env, settings._productMeta, competitors, recentSuggested);
+                  }
+
+                  if (suggestions && suggestions.length > 0) {
+                    const message = formatWeeklySuggestions(suggestions, settings._productMeta, tier);
+                    await sendSlack(settings.slackWebhookUrl, message);
+                    const newEntries = suggestions.map(s => ({ name: s.name, date: new Date().toISOString() }));
+                    const updatedSuggested = [...(prevData.suggested || []).filter(s => {
+                      const d = typeof s === "string" ? null : s.date;
+                      return d && (now - new Date(d).getTime()) < 90 * 24 * 60 * 60 * 1000;
+                    }), ...newEntries];
+                    await env.STATE.put(suggestKey, JSON.stringify({
+                      suggested: updatedSuggested,
+                      lastRun: new Date().toISOString(),
+                    }));
+                    console.log(`Weekly suggestions sent for ${user.email}: ${suggestions.length} suggestions${isFirstFriday ? " (deep)" : ""}`);
+                  }
+                } else {
+                  console.log(`Skipping weekly suggestions for ${user.email}: ${!settings._productMeta ? "no productMeta" : "no Slack"}`);
+                }
+              } catch (e) {
+                console.log(`Weekly suggestions failed for ${user.email}: ${e.message}`);
+              }
+            }
+
             // Scout: no scheduled scans (manual only)
             if (!hasFeature(tier, "scheduled_scans")) {
               console.log(`Skipping ${user.email} (${tier}) — manual scans only`);
               continue;
             }
-            // Operator: only runs at 9am and 9pm UTC slots
-            if (tier === "operator" && !OPERATOR_SLOTS.includes(slot)) {
-              console.log(`Skipping ${user.email} (operator) — not their scan slot (hour ${slot})`);
-              continue;
-            }
-            // Command: runs all 4 slots
-            console.log(`Running scan for ${user.email} (${tier}) at slot ${slot}`);
+            // Operator and Command both run the daily scan
+            console.log(`Running daily scan for ${user.email} (${tier})`);
             await runMonitor(env, null, userId);
           } catch (e) {
             console.log(`Scan failed for user ${userId}: ${e.message}`);
@@ -3926,7 +4366,55 @@ export default {
         }
       })());
     } else {
-      ctx.waitUntil(runMonitor(env));
+      ctx.waitUntil((async () => {
+        // Weekly competitor suggestions for self-hosted mode (Fridays)
+        const selfFriday = new Date().getUTCDay() === 5;
+        const selfFirstFriday = selfFriday && new Date().getUTCDate() <= 7;
+        if (selfFriday) {
+          try {
+            const config = await loadConfig(env);
+            const { competitors, settings } = config;
+            if (settings._productMeta && settings.slackWebhookUrl) {
+              const suggestKey = "weekly_suggestions";
+              const prevRaw = await env.STATE.get(suggestKey);
+              const prevData = prevRaw ? JSON.parse(prevRaw) : { suggested: [], lastRun: null };
+              const now = Date.now();
+              const recentSuggested = (prevData.suggested || []).filter(s => {
+                if (typeof s === "string") return true;
+                return s.date && (now - new Date(s.date).getTime()) < 90 * 24 * 60 * 60 * 1000;
+              }).map(s => typeof s === "string" ? s : s.name);
+
+              let suggestions;
+              if (selfFirstFriday && env.BRAVE_SEARCH_API_KEY) {
+                const enriched = await enrichProductMeta(env, settings._productMeta, null);
+                if (enriched !== settings._productMeta) {
+                  const settRaw = await env.STATE.get("config:settings");
+                  const fullSettings = settRaw ? JSON.parse(settRaw) : {};
+                  fullSettings._productMeta = enriched;
+                  await env.STATE.put("config:settings", JSON.stringify(fullSettings));
+                }
+                suggestions = await deepCompetitorDiscovery(env, enriched, competitors, recentSuggested);
+              } else {
+                suggestions = await suggestNewCompetitors(env, settings._productMeta, competitors, recentSuggested);
+              }
+
+              if (suggestions && suggestions.length > 0) {
+                const message = formatWeeklySuggestions(suggestions, settings._productMeta, "command");
+                await sendSlack(settings.slackWebhookUrl, message);
+                const newEntries = suggestions.map(s => ({ name: s.name, date: new Date().toISOString() }));
+                const updatedSuggested = [...(prevData.suggested || []).filter(s => {
+                  const d = typeof s === "string" ? null : s.date;
+                  return d && (now - new Date(d).getTime()) < 90 * 24 * 60 * 60 * 1000;
+                }), ...newEntries];
+                await env.STATE.put(suggestKey, JSON.stringify({ suggested: updatedSuggested, lastRun: new Date().toISOString() }));
+              }
+            }
+          } catch (e) {
+            console.log(`Weekly suggestions failed: ${e.message}`);
+          }
+        }
+        await runMonitor(env);
+      })());
     }
   },
 
@@ -4061,7 +4549,7 @@ export default {
         await env.STATE.put("csrf:" + nonce, "1", { expirationTtl: 600 });
         const slackUrl = "https://slack.com/oauth/v2/authorize?" + new URLSearchParams({
           client_id: env.SLACK_CLIENT_ID,
-          scope: "incoming-webhook",
+          scope: "incoming-webhook,commands",
           redirect_uri: url.origin + "/auth/slack/callback",
           state: JSON.stringify({ nonce, userId: user.id }),
         }).toString();
@@ -4153,21 +4641,36 @@ export default {
           if (!hasFeature(user.tier, "slash_ads")) {
             return jsonResponse({ response_type: "ephemeral", text: "The `/ads` command is available on Operator and Command plans. Upgrade at worker.scopehound.app/billing" });
           }
-          if (!text) return jsonResponse({ response_type: "ephemeral", text: "Usage: `/ads <domain>` — e.g. `/ads acme.com`" });
-          let domain = text.replace(/^https?:\/\//i, "").replace(/^www\./, "").replace(/\/.*$/, "").toLowerCase();
-          if (!domain.includes(".")) return jsonResponse({ response_type: "ephemeral", text: "Please provide a valid domain, e.g. `/ads acme.com`" });
+          if (!text) return jsonResponse({ response_type: "ephemeral", text: "Usage: `/ads <domain or company name>` — e.g. `/ads acme.com` or `/ads Acme Corp`" });
 
-          // Look up competitor name from user's config
+          // Look up competitor from user's config (match by domain or name)
           const prefix = "user_config:" + userId + ":";
           const compsRaw = await env.STATE.get(prefix + "competitors");
           const comps = compsRaw ? JSON.parse(compsRaw) : [];
-          const match = comps.find(c => {
-            try { return new URL(c.website).hostname.replace(/^www\./, "") === domain; } catch { return false; }
-          });
-          const companyName = match ? match.name : domain.split(".")[0].charAt(0).toUpperCase() + domain.split(".")[0].slice(1);
+
+          let input = text.replace(/^https?:\/\//i, "").replace(/^www\./, "").replace(/\/.*$/, "").trim();
+          let domain = null;
+          let companyName = null;
+
+          if (input.includes(".")) {
+            // Input looks like a domain
+            domain = input.toLowerCase();
+            const match = comps.find(c => {
+              try { return new URL(c.website).hostname.replace(/^www\./, "") === domain; } catch { return false; }
+            });
+            companyName = match ? match.name : domain.split(".")[0].charAt(0).toUpperCase() + domain.split(".")[0].slice(1);
+          } else {
+            // Input is a company name — try to find their domain from config
+            companyName = input;
+            const match = comps.find(c => c.name.toLowerCase() === input.toLowerCase());
+            if (match) {
+              try { domain = new URL(match.website).hostname.replace(/^www\./, ""); } catch {}
+              companyName = match.name;
+            }
+          }
 
           // Respond immediately, then fetch ad data in background
-          const immediate = jsonResponse({ response_type: "ephemeral", text: `🔎 Looking up ads for ${domain}...` });
+          const immediate = jsonResponse({ response_type: "ephemeral", text: `🔎 Looking up ads for ${companyName}...` });
 
           ctx.waitUntil((async () => {
             try {
@@ -4191,7 +4694,7 @@ export default {
 
         // ── /scopehound commands ──
         if (!text || text === "help") {
-          return jsonResponse({ response_type: "ephemeral", text: "*ScopeHound Commands*\n`/scopehound add <url>` — Add a competitor\n`/scopehound list` — List your competitors\n`/scopehound remove <name>` — Remove a competitor\n`/scopehound scan` — Trigger a manual scan\n`/ads <domain>` — Look up competitor ads" });
+          return jsonResponse({ response_type: "ephemeral", text: "*ScopeHound Commands*\n`/scopehound add <url>` — Add a competitor\n`/scopehound list` — List your competitors\n`/scopehound remove <name>` — Remove a competitor\n`/scopehound scan` — Trigger a manual scan\n`/scopehound set priority <high|medium|low>` — Filter alert priority\n`/ads <domain or name>` — Look up competitor ads" });
         }
 
         const prefix = "user_config:" + userId + ":";
@@ -4249,6 +4752,24 @@ export default {
           const removed = comps.splice(idx, 1)[0];
           await env.STATE.put(prefix + "competitors", JSON.stringify(comps));
           return jsonResponse({ response_type: "ephemeral", text: `Removed *${removed.name}* (${removed.website}).` });
+        }
+
+        if (text.startsWith("set ")) {
+          const args = text.slice(4).trim();
+          const settingsKey = "user_config:" + userId + ":settings";
+          const settRaw = await env.STATE.get(settingsKey);
+          const sett = settRaw ? JSON.parse(settRaw) : {};
+          if (args.startsWith("priority ")) {
+            const level = args.slice(9).trim().toLowerCase();
+            if (!["high", "medium", "low"].includes(level)) {
+              return jsonResponse({ response_type: "ephemeral", text: "Invalid priority. Use `high`, `medium`, or `low`.\n• `high` — only pricing/product changes and major shifts\n• `medium` — feature updates and messaging changes (+ high)\n• `low` — everything including minor copy edits (default)" });
+            }
+            sett.slackMinPriority = level;
+            await env.STATE.put(settingsKey, JSON.stringify(sett));
+            const desc = { high: "only high-priority alerts (pricing/product changes, major shifts)", medium: "medium and high-priority alerts", low: "all alerts (default)" };
+            return jsonResponse({ response_type: "ephemeral", text: `Alert filter updated. You'll now receive ${desc[level]}.` });
+          }
+          return jsonResponse({ response_type: "ephemeral", text: "Available settings:\n`/scopehound set priority <high|medium|low>` — Filter Slack alerts by priority" });
         }
 
         if (text === "scan") {
@@ -4325,6 +4846,19 @@ export default {
       // ── Partner: submit application ──
       if (path === "/api/partner/apply" && request.method === "POST") {
         try {
+          // Rate limit: 3 applications per IP per hour
+          const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+          const rlKey = "partner_apply_rl:" + ip;
+          const rlData = JSON.parse(await env.STATE.get(rlKey) || "null");
+          const now = Date.now();
+          if (rlData && rlData.count >= 3 && (now - rlData.first) < 3600000) {
+            return jsonResponse({ error: "Too many requests. Please try again later." }, 429);
+          }
+          if (!rlData || (now - rlData.first) >= 3600000) {
+            await env.STATE.put(rlKey, JSON.stringify({ count: 1, first: now }), { expirationTtl: 3600 });
+          } else {
+            await env.STATE.put(rlKey, JSON.stringify({ count: rlData.count + 1, first: rlData.first }), { expirationTtl: 3600 });
+          }
           const body = await request.json();
           if (!body.name || !body.email || !body.paypalEmail) return jsonResponse({ error: "Name, email, and PayPal email required" }, 400);
           const existing = await env.STATE.get("affiliate_email:" + body.email);
@@ -4362,6 +4896,19 @@ export default {
 
       // ── Partner: stats API ──
       if (path === "/api/partner/stats") {
+        // Rate limit: 20 requests per IP per 15 minutes
+        const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+        const rlKey = "partner_stats_rl:" + ip;
+        const rlData = JSON.parse(await env.STATE.get(rlKey) || "null");
+        const now = Date.now();
+        if (rlData && rlData.count >= 20 && (now - rlData.first) < 900000) {
+          return jsonResponse({ error: "Too many requests. Please try again later." }, 429);
+        }
+        if (!rlData || (now - rlData.first) >= 900000) {
+          await env.STATE.put(rlKey, JSON.stringify({ count: 1, first: now }), { expirationTtl: 900 });
+        } else {
+          await env.STATE.put(rlKey, JSON.stringify({ count: rlData.count + 1, first: rlData.first }), { expirationTtl: 900 });
+        }
         const code = url.searchParams.get("code");
         const email = url.searchParams.get("email");
         if (!code || !email) return jsonResponse({ error: "code and email required" }, 400);
@@ -4533,9 +5080,9 @@ export default {
       const authErr = requireAuth(request, env);
       if (!adminSession && authErr) return authErr;
 
-      const slot = parseInt(url.searchParams.get("slot") || new Date().getUTCHours());
       const userId = url.searchParams.get("user") || null;
       const dryRun = url.searchParams.get("dry_run") === "true";
+      const forceMode = url.searchParams.get("mode") || null; // "light" forces light mode, default = deep
       const logs = [];
       const origLog = console.log;
       console.log = (...args) => { logs.push(args.join(" ")); origLog(...args); };
@@ -4559,13 +5106,12 @@ export default {
           if (!dryRun) {
             await runMonitor(env, null, userId);
           }
-          return jsonResponse({ mode: dryRun ? "dry_run" : "executed", slot, user: info, logs });
+          return jsonResponse({ mode: dryRun ? "dry_run" : "executed", user: info, logs });
         }
 
         // Full cron simulation
         const raw = await env.STATE.get("active_subscribers");
         const list = raw ? JSON.parse(raw) : [];
-        const OPERATOR_SLOTS = [9, 21];
         const results = [];
 
         for (const uid of list) {
@@ -4582,8 +5128,58 @@ export default {
           };
 
           if (user.subscriptionStatus !== "active") { results.push({ ...info, status: "skipped_inactive" }); continue; }
+
+          // Weekly suggestions (always runs on manual trigger for testing)
+          // Use ?mode=light to force light mode (single Sonnet call) for testing fallback
+          if (!dryRun) {
+            try {
+              if (cfg.settings._productMeta && cfg.settings.slackWebhookUrl) {
+                const suggestKey = `user_state:${uid}:weekly_suggestions`;
+                const prevRaw = await env.STATE.get(suggestKey);
+                const prevData = prevRaw ? JSON.parse(prevRaw) : { suggested: [], lastRun: null };
+                const now = Date.now();
+                const recentSuggested = (prevData.suggested || []).filter(s => {
+                  if (typeof s === "string") return true;
+                  return s.date && (now - new Date(s.date).getTime()) < 90 * 24 * 60 * 60 * 1000;
+                }).map(s => typeof s === "string" ? s : s.name);
+
+                let suggestions;
+                if (forceMode !== "light" && env.BRAVE_SEARCH_API_KEY) {
+                  // Deep chain (default for trigger-cron, unless ?mode=light)
+                  console.log(`Running deep competitor discovery for ${user.email}`);
+                  const enriched = await enrichProductMeta(env, cfg.settings._productMeta, null);
+                  if (enriched !== cfg.settings._productMeta) {
+                    const settingsKey = `user_config:${uid}:settings`;
+                    const settRaw = await env.STATE.get(settingsKey);
+                    const fullSettings = settRaw ? JSON.parse(settRaw) : {};
+                    fullSettings._productMeta = enriched;
+                    await env.STATE.put(settingsKey, JSON.stringify(fullSettings));
+                  }
+                  suggestions = await deepCompetitorDiscovery(env, enriched, cfg.competitors, recentSuggested);
+                } else {
+                  suggestions = await suggestNewCompetitors(env, cfg.settings._productMeta, cfg.competitors, recentSuggested);
+                }
+
+                if (suggestions && suggestions.length > 0) {
+                  const message = formatWeeklySuggestions(suggestions, cfg.settings._productMeta, tier);
+                  await sendSlack(cfg.settings.slackWebhookUrl, message);
+                  const newEntries = suggestions.map(s => ({ name: s.name, date: new Date().toISOString() }));
+                  const updatedSuggested = [...(prevData.suggested || []).filter(s => {
+                    const d = typeof s === "string" ? null : s.date;
+                    return d && (now - new Date(d).getTime()) < 90 * 24 * 60 * 60 * 1000;
+                  }), ...newEntries];
+                  await env.STATE.put(suggestKey, JSON.stringify({ suggested: updatedSuggested, lastRun: new Date().toISOString() }));
+                  console.log(`Weekly suggestions sent for ${user.email}: ${suggestions.length} suggestions (${forceMode === "light" ? "light" : "deep"})`);
+                }
+              } else {
+                console.log(`Skipping weekly suggestions for ${user.email}: ${!cfg.settings._productMeta ? "no productMeta" : "no Slack"}`);
+              }
+            } catch (e) {
+              console.log(`Weekly suggestions failed for ${user.email}: ${e.message}`);
+            }
+          }
+
           if (!hasFeature(tier, "scheduled_scans")) { results.push({ ...info, status: "skipped_no_scheduled_scans" }); continue; }
-          if (tier === "operator" && !OPERATOR_SLOTS.includes(slot)) { results.push({ ...info, status: "skipped_wrong_slot" }); continue; }
 
           if (!dryRun) {
             try { await runMonitor(env, null, uid); results.push({ ...info, status: "executed" }); }
@@ -4593,7 +5189,7 @@ export default {
           }
         }
 
-        return jsonResponse({ mode: dryRun ? "dry_run" : "executed", slot, subscriberCount: list.length, results, logs });
+        return jsonResponse({ mode: dryRun ? "dry_run" : "executed", subscriberCount: list.length, results, logs });
       } finally {
         console.log = origLog;
       }
@@ -5012,7 +5608,7 @@ p{font-size:14px;color:#b0b5bd;margin-bottom:12px}
 <p>Go to your dashboard and click "Manage Competitors" in the navigation bar. This takes you to the setup wizard where you can add, scan, or remove competitors. You can also use Slack commands: <code>/scopehound add url</code> or <code>/scopehound remove name</code>.</p></details>
 
 <details class="faq-item"><summary>When do scans run?</summary>
-<p>Scans run automatically once daily at 9:00 AM UTC. Higher-tier plans support multiple scans per day. You can also trigger a manual scan from the setup wizard or via <code>/scopehound scan</code> in Slack.</p></details>
+<p>Scans run automatically once daily at 9:00 AM UTC for Operator and Command plans. Scout is manual-only. You can also trigger a manual scan from the setup wizard or via <code>/scopehound scan</code> in Slack.</p></details>
 
 <details class="faq-item"><summary>How do I connect Slack?</summary>
 <p>During setup, click "Add to Slack" to authorize ScopeHound to send reports to your workspace. You can also manually enter a webhook URL if you prefer. Visit /setup to reconfigure your Slack connection.</p></details>

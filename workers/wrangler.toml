@@ -2,9 +2,9 @@ name = "scopehoundv3-worker"
 main = "src/index.js"
 compatibility_date = "2026-02-12"
 
-# Cron trigger - runs every 6 hours (Scout: manual only, Operator: 9am+9pm, Command: all 4)
+# Cron trigger - runs once daily at 9am UTC (Scout: manual only, Operator+Command: daily)
 [triggers]
-crons = ["0 3,9,15,21 * * *"]
+crons = ["0 9 * * *"]
 
 # KV namespace for storing state
 [[kv_namespaces]]
@@ -69,6 +69,10 @@ crons = []
 #   SLACK_CLIENT_ID      - Slack app client ID
 #   SLACK_CLIENT_SECRET  - Slack app client secret
 #   SLACK_SIGNING_SECRET - Slack app signing secret (for verifying slash commands)
+#
+# COMPETITOR DISCOVERY (optional, enables deep web-search-powered discovery):
+#   BRAVE_SEARCH_API_KEY - Brave Search API key (free tier: 2000 queries/month)
+#                          Without this, weekly suggestions use AI knowledge only (no web search)
 #
 # AD LIBRARY (optional, enables /ads command with live Meta data):
 #   META_APP_TOKEN       - Meta (Facebook) app access token with ads_library permission
