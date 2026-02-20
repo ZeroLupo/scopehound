@@ -1164,5 +1164,26 @@
   },1000);
 })();
 </script>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+<script>
+$(document).ready(function(){
+    setTimeout(function() {
+        $('a[href^="https://buy.stripe.com/"]').each(function(){
+            const oldBuyUrl = $(this).attr("href");
+            const referralId = window.endorsely_referral;
+            if (!oldBuyUrl.includes("client_reference_id")) {
+                const newBuyUrl = oldBuyUrl + "?client_reference_id=" + referralId;
+                $(this).attr("href", newBuyUrl);
+            }
+        });
+        $("[pricing-table-id]").each(function(){
+            $(this).attr("client-reference-id", window.endorsely_referral);
+        });
+        $("[buy-button-id]").each(function(){
+            $(this).attr("client-reference-id", window.endorsely_referral);
+        });
+    }, 2000);
+});
+</script>
 </body>
 </html>
