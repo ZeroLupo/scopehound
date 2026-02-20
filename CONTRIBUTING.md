@@ -24,7 +24,7 @@ ScopeHound is a single Cloudflare Worker. No build step.
 - Single file (`workers/src/index.js`) — keep it that way
 - No external dependencies — everything runs on Cloudflare's runtime
 - Functions are grouped by section with comment headers
-- Keep AI prompts concise — the 8B model has limited context
+- Keep AI prompts concise — Workers AI uses an 8B model with limited context. Anthropic prompts can be richer but should still be token-efficient
 
 ## Guidelines
 

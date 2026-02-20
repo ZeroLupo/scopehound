@@ -15,6 +15,10 @@ ScopeHound checks your competitors daily and tells you what changed, why it matt
 - **Product Hunt** — New launches in your categories with vote tracking
 - **AI analysis** — Every change gets a priority rating (HIGH/MEDIUM/LOW), impact analysis, and recommended action
 - **Slack delivery** — Daily digest with changes grouped by priority
+- **Slack commands** — `/scopehound scan`, `/scopehound add <url>`, `/scopehound status`, `/scopehound ads <company>`
+- **Competitor discovery** — Weekly AI-powered suggestions for new competitors to track
+- **Deep discovery** — Monthly web-search-powered competitor discovery via Brave Search API (optional)
+- **Ad library** — `/ads` command surfaces Meta ad library data for any competitor
 - **Web dashboard** — Overview, change history, pricing comparison, SEO signals
 
 ## Quick Start
@@ -35,6 +39,11 @@ ScopeHound checks your competitors daily and tells you what changed, why it matt
 
 Copy the contents of `workers/src/index.js` and paste it into your Worker's code editor. Click **Deploy**.
 
+Or via CLI:
+```bash
+npx wrangler deploy
+```
+
 ### 3. Configure
 
 Visit `https://your-worker.your-subdomain.workers.dev/setup` and follow the 4-step wizard:
@@ -46,48 +55,51 @@ Visit `https://your-worker.your-subdomain.workers.dev/setup` and follow the 4-st
 
 That's it. ScopeHound runs daily at 9am UTC.
 
-## Endpoints
+## Optional Secrets
 
-| Path | Description |
-|------|-------------|
-| `/dashboard` | Web dashboard |
-| `/setup` | Configuration wizard |
-| `/test` | Run monitor manually |
-| `/state` | View raw state JSON |
-| `/history` | View change history |
-| `/test-slack` | Send test Slack message |
-| `/reset` | Reset all state |
-| `/reset-pricing` | Reset pricing data only |
-| `/api/config` | Read config (requires auth) |
+Set via Cloudflare dashboard or `wrangler secret put <NAME>`:
+
+| Secret | Purpose |
+|--------|---------|
+| `ADMIN_TOKEN` | **Required.** Protects config API and setup wizard |
+| `SLACK_WEBHOOK_URL` | Fallback if not set via setup wizard |
+| `ANTHROPIC_API_KEY` | Upgrades AI analysis from Workers AI (free) to Claude (much better) |
+| `BRAVE_SEARCH_API_KEY` | Enables deep web-search-powered competitor discovery (monthly) |
+| `META_APP_TOKEN` | Enables live Meta ad library data for `/ads` command |
+| `SLACK_CLIENT_ID` | Enables "Add to Slack" OAuth + slash commands |
+| `SLACK_CLIENT_SECRET` | Slack OAuth (paired with client ID) |
+| `SLACK_SIGNING_SECRET` | Verifies slash command requests from Slack |
 
 ## Architecture
 
 Single file. No build step. No dependencies.
 
-- **Runtime:** Cloudflare Workers (free tier)
-- **AI:** Cloudflare Workers AI — Llama 3.1 8B (free tier)
-- **Storage:** Cloudflare KV (free tier)
-- **Alerts:** Slack webhooks
+- **Runtime:** Cloudflare Workers
+- **AI:** Cloudflare Workers AI (free) or Anthropic Claude (optional, better analysis)
+- **Storage:** Cloudflare KV
+- **Alerts:** Slack webhooks + optional slash commands
+- **Search:** Brave Search API (optional, for competitor discovery)
 - **Schedule:** Cron trigger, daily at 9am UTC
 
-### Cost
+### Cost (Self-Hosted)
 
-$0 on Cloudflare free tier for up to ~25 competitors.
+$0 on Cloudflare free tier for up to ~25 competitors. Optional Anthropic API key for enhanced AI analysis (~$0.10/day for 10 competitors).
 
 ## Hosted Version
 
-Don't want to self-host? ScopeHound Cloud handles everything — no Cloudflare account needed, team features, advanced analytics.
+Don't want to self-host? [ScopeHound Cloud](https://scopehound.app) handles everything.
 
-| Plan | Competitors | Price |
-|------|-------------|-------|
-| Recon | 3 | $19.99/mo |
-| Operator | 15 | $49/mo |
-| Commander | 25 | $99/mo |
-| Strategic | 50 | $199/mo |
+| Plan | Competitors | Pages | Scans | Price |
+|------|-------------|-------|-------|-------|
+| Scout | 3 | 6 | Manual | $29/mo |
+| Operator | 15 | 60 | Daily automated | $79/mo |
+| Command | 50 | 200 | Daily automated | $199/mo |
+
+All paid plans include AI analysis, Slack alerts, web dashboard, and change history. Operator and Command add automated scans, RSS monitoring, competitor discovery, and slash commands.
 
 ### Partner Program
 
-Earn 50% recurring commission for 24 months on every referral.
+Earn 50% recurring commission for 24 months on every referral. [Apply here](https://scopehound.app/partner/apply).
 
 ## License
 
