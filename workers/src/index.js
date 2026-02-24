@@ -3452,7 +3452,7 @@ async function loadUserInfo(){
     renderPHTopics(c.settings.productHuntTopics.map(t=>({slug:t.slug,name:t.name,reason:t.slug})));
   }
   if(c.settings&&c.settings.radarSubreddits&&c.settings.radarSubreddits.length>0){
-    window._radarSubreddits=c.settings.radarSubreddits.map(s=>s.replace(/^r\\//i,""));
+    window._radarSubreddits=c.settings.radarSubreddits.map(s=>s.toLowerCase().startsWith("r/")?s.slice(2):s);
     renderRadarSubs(window._radarSubreddits.map(s=>({name:s,reason:"Configured"})));
   }
   // Show PH/Reddit section if any data exists or competitors are loaded
@@ -3744,7 +3744,7 @@ async function suggestSubs(){
     const r=await fetch("/api/config/suggest-subreddits",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productMeta:window._productMeta})});
     const d=await r.json();
     if(d.error){document.getElementById("radarMsg").innerHTML='<div class="msg msg-err">'+esc(d.error)+'</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";return;}
-    const subs=(d.subreddits||[]).map(s=>({...s,name:s.name.replace(/^r\\//i,"")}));
+    const subs=(d.subreddits||[]).map(s=>({...s,name:s.name.toLowerCase().startsWith("r/")?s.name.slice(2):s.name}));
     if(subs.length===0){document.getElementById("radarMsg").innerHTML='<div class="msg">No relevant subreddits found.</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";return;}
     window._radarSubreddits=subs.map(s=>s.name);
     renderRadarSubs(subs);
@@ -3752,7 +3752,7 @@ async function suggestSubs(){
   }catch(e){document.getElementById("radarMsg").innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";}
 }
 function renderRadarSubs(subs){
-  subs=subs.map(s=>({...s,name:s.name.replace(/^r\\//i,"")}));
+  subs=subs.map(s=>({...s,name:s.name.toLowerCase().startsWith("r/")?s.name.slice(2):s.name}));
   const el=document.getElementById("radarSubs");
   el.innerHTML=subs.map((s,i)=>{
     return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3038">'
