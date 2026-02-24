@@ -2116,17 +2116,24 @@ async function discoverPages(websiteUrl) {
       { match: ["features", "product", "solutions"], type: "general", label: "Features" },
     ];
     for (const p of patterns) {
+      let bestLink = null;
+      let bestDepth = Infinity;
       for (const link of links) {
         const segments = link.path.split("/").filter(Boolean);
-        if (p.match.some(m => segments.some(s => s === m || s.includes(m)))) {
-          if (!seen.has(link.href)) {
-            const entry = { url: link.href, type: p.type, label: p.label };
-            if (p.type === "blog" && rssUrl) entry.rss = rssUrl;
-            pages.push(entry);
-            seen.add(link.href);
+        // Use exact segment or hyphenated-word match (not substring) to avoid
+        // false positives like "financial-planning-budgeting" matching "plan"
+        if (p.match.some(m => segments.some(s => s === m || s.split("-").includes(m)))) {
+          if (!seen.has(link.href) && segments.length < bestDepth) {
+            bestLink = link;
+            bestDepth = segments.length;
           }
-          break;
         }
+      }
+      if (bestLink) {
+        const entry = { url: bestLink.href, type: p.type, label: p.label };
+        if (p.type === "blog" && rssUrl) entry.rss = rssUrl;
+        pages.push(entry);
+        seen.add(bestLink.href);
       }
     }
     // If no blog found but RSS detected, try to detect blog via RSS
