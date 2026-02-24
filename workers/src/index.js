@@ -3452,8 +3452,8 @@ async function loadUserInfo(){
     renderPHTopics(c.settings.productHuntTopics.map(t=>({slug:t.slug,name:t.name,reason:t.slug})));
   }
   if(c.settings&&c.settings.radarSubreddits&&c.settings.radarSubreddits.length>0){
-    window._radarSubreddits=c.settings.radarSubreddits;
-    renderRadarSubs(c.settings.radarSubreddits.map(s=>({name:s,reason:"Configured"})));
+    window._radarSubreddits=c.settings.radarSubreddits.map(s=>s.replace(/^r\\//i,""));
+    renderRadarSubs(window._radarSubreddits.map(s=>({name:s,reason:"Configured"})));
   }
   // Show PH/Reddit section if any data exists or competitors are loaded
   if(window._phTopics.length>0||window._radarSubreddits.length>0||(c.competitors&&c.competitors.length>0)){
@@ -3752,6 +3752,7 @@ async function suggestSubs(){
   }catch(e){document.getElementById("radarMsg").innerHTML='<div class="msg msg-err">'+esc(e.message)+'</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";}
 }
 function renderRadarSubs(subs){
+  subs=subs.map(s=>({...s,name:s.name.replace(/^r\\//i,"")}));
   const el=document.getElementById("radarSubs");
   el.innerHTML=subs.map((s,i)=>{
     return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #2a3038">'
