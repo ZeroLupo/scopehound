@@ -3737,7 +3737,7 @@ async function suggestSubs(){
     const r=await fetch("/api/config/suggest-subreddits",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({productMeta:window._productMeta})});
     const d=await r.json();
     if(d.error){document.getElementById("radarMsg").innerHTML='<div class="msg msg-err">'+esc(d.error)+'</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";return;}
-    const subs=d.subreddits||[];
+    const subs=(d.subreddits||[]).map(s=>({...s,name:s.name.replace(/^r\\//i,"")}));
     if(subs.length===0){document.getElementById("radarMsg").innerHTML='<div class="msg">No relevant subreddits found.</div>';btn.disabled=false;btn.textContent="Suggest Subreddits";return;}
     window._radarSubreddits=subs.map(s=>s.name);
     renderRadarSubs(subs);
