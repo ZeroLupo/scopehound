@@ -64,7 +64,7 @@ async function loadConfig(env, userId) {
   return {
     competitors,
     settings: {
-      slackWebhookUrl: settings.slackWebhookUrl || env.SLACK_WEBHOOK_URL || null,
+      slackWebhookUrl: settings.slackWebhookUrl || (userId ? null : env.SLACK_WEBHOOK_URL) || null,
       productHuntTopics: settings.productHuntTopics || [],
       announcementKeywords: settings.announcementKeywords || DEFAULT_ANNOUNCEMENT_KEYWORDS,
       phMinVotes: settings.phMinVotes ?? 0,
