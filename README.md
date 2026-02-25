@@ -93,7 +93,7 @@ Don't want to self-host? [ScopeHound Cloud](https://scopehound.app) handles ever
 |------|-------------|-------|-------|-------|
 | Scout | 3 | 6 | Manual | $29/mo |
 | Operator | 15 | 60 | Daily automated | $79/mo |
-| Command | 50 | 200 | Daily automated | $199/mo |
+| Command | 50 | 400 | Daily automated | $199/mo |
 
 All paid plans include AI analysis, Slack alerts, web dashboard, and change history. Operator and Command add automated scans, RSS monitoring, competitor discovery, and slash commands.
 

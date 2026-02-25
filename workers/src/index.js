@@ -23,12 +23,12 @@ const DEFAULT_ANNOUNCEMENT_KEYWORDS = {
 // ─── TIER DEFINITIONS ────────────────────────────────────────────────────────
 
 const TIERS = {
-  scout:     { name: "Scout",     competitors: 3,  pages: 6,   scansPerDay: 0, historyDays: 30 },
-  operator:  { name: "Operator",  competitors: 15, pages: 60,  scansPerDay: 2, historyDays: 365 },
-  command:   { name: "Command",   competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
+  scout:     { name: "Scout",     competitors: 3,  pages: 6,   pagesPerComp: 4, scansPerDay: 0, historyDays: 30 },
+  operator:  { name: "Operator",  competitors: 15, pages: 60,  pagesPerComp: 4, scansPerDay: 2, historyDays: 365 },
+  command:   { name: "Command",   competitors: 50, pages: 400, pagesPerComp: 8, scansPerDay: 4, historyDays: -1 },
   // Legacy aliases (pre-migration user records may still reference old tier names)
-  recon:     { name: "Scout",     competitors: 3,  pages: 6,   scansPerDay: 0, historyDays: 30 },
-  strategic: { name: "Command",   competitors: 50, pages: 200, scansPerDay: 4, historyDays: -1 },
+  recon:     { name: "Scout",     competitors: 3,  pages: 6,   pagesPerComp: 4, scansPerDay: 0, historyDays: 30 },
+  strategic: { name: "Command",   competitors: 50, pages: 400, pagesPerComp: 8, scansPerDay: 4, historyDays: -1 },
 };
 
 const FEATURE_GATES = {
@@ -2695,6 +2695,10 @@ async function recordAffiliateCommission(env, code, userId, amountCents, tier) {
   }
 }
 
+// ─── FAVICON (embedded data URI) ─────────────────────────────────────────────
+
+const FAVICON_LINK = '<link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAIKADAAQAAAABAAAAIAAAAACshmLzAAAECElEQVRYCe1WS28bVRT+7jxtz9iOSWM7hlQlpKItdMEWlecKiTViwZINK3b8BH5AIyGxQGIDG/aIJUKqxKYLqiiiVI1ISfNyEtvjmfG87oNzDZHYIF+g6oYcyxrNzLnn+853zj13gAv7vytg/wcBfATBpdD3g7IsOcUR/yYW+yeLgiDobVwP311q+e/U6s5NMLbCFJRU8jTPxNY4Kr/79UHybZIkQ9O4RgTW1zvtzkrj4363/lEQOgMlgYKXKCtKWil4rgPXdmHbDOms2j8a5p9Hp9nmw4ej6SIiRiV44erS+xtX25tFVTSTtARTFoFzMPoRPipNRFqIsxyOy1r9buPtLKvuH+wn9xYRcBY56PeNwMNsViJOCzR8H9mME5CFet0DFxKcV8gyeuYxTJOMVPljjUlsy8SJfHJKlkrOUPPcedYOyS6o9eJpCSUsWBaD77uwtC7kJxmIyWIzIiCEyqEYLApccYnxJEO7sAhYQgqF6bTA6VmKsqBSMHpOCnCuisXwIMIGpriVaF11ZpwI2HR966wGNeVUlhJh6GEyySEJ+byrRSVTg9BmBDJeTgVFJ1wIKXWn42t3hKMsw6AfYjBo07NyTo4EIAWUot6InhiBvLQjqmyh68xLSY2W48HjMxSloNpbGI9nuPlSn8qh7zUsKxWtMSFgtAvKuIqg3NRiVk3REOgs1bFE/xvXu/OyTIiAoH6YZVQemgU0m5JYrzEwox7Y2TmeUPwTrYC24UkCh4B+25tgd3dE9ynubR2BV3L+nCl2otcY4MNIAQpUUuI7sNS1RmhT0/k4OIyxvBxASr0LcoSBj7DlUiMKms3Wjl5jQsBIAR2o4uqu69h6xqDTqSFOirns1G+YRBnCpgNmK1LABu2Auybg2seYwOOh+CnJCGxaIaZJGMUVEVCUMTBNOWa5wiiqkKQS+8d84Qg+J3i+bc/v/+7qfPhe9/srfXWroDoLrubgh7MluA7DJW8Ml0az79NEpL26e4Qfv/hm5U1ge2EZDHtgw35+Ne21GxKu3naUZZIxDMIZEVCo03huNhgmiYTnWbjcVV0gNVLXkABQoyNgHCsstxjGiULgM/pLTFJF/WERuMAoBr0XqPmWbhUjM2IJtOWjocgJUIxjgXYDGCxLakiB1WVF2Qt0msDLVxgRkCJKBZ0DJI2BmfYAar32uq2ysFmrX7vxYuerNM9dTschHVFUBqq/51XbP48+4FX5i0Q9jYaR3ooLzeiDREfhaTGuUnGcRMX2YK3lrD0bvkGfYlRzG/1eC1HEP72/dfJZTj4F+S5E/tPBmMBfA+49iu48sxKurfaCV4K6j8OD2Zd3ftj7hHzoY+3pmXvr9cu3X33tuU2CdJ8e7AXShQJPWIHfAXwg+fjvUdswAAAAAElFTkSuQmCC">';
+
 // ─── DASHBOARD HTML ──────────────────────────────────────────────────────────
 
 const DASHBOARD_HTML = `<!DOCTYPE html>
@@ -2702,6 +2706,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Competitive Intelligence</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
@@ -2838,6 +2843,7 @@ const SETUP_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Setup</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
@@ -3073,6 +3079,7 @@ const SIGNIN_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Sign In</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
@@ -3108,6 +3115,7 @@ const BILLING_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Billing</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
@@ -3159,7 +3167,7 @@ h2{font-size:16px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em
 <div class="grid" style="grid-template-columns:repeat(3,1fr)">
 <div class="plan" data-tier="scout"><div class="plan-name">Scout</div><div class="plan-price" data-monthly="29" data-annual="290">$29<span class="mo">/mo</span></div><ul class="plan-features"><li>3 competitors</li><li>6 pages</li><li>Manual scans only</li><li>30-day history</li><li>Dashboard + Slack alerts</li></ul><button class="btn btn-primary" id="btn-scout" onclick="checkout('scout')">Subscribe</button></div>
 <div class="plan" data-tier="operator" style="border-color:#5c6b3c;position:relative"><div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#5c6b3c;color:#fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;padding:2px 10px;border-radius:2px">Recommended</div><div class="plan-name">Operator</div><div class="plan-price" data-monthly="79" data-annual="790">$79<span class="mo">/mo</span></div><ul class="plan-features"><li>15 competitors</li><li>60 pages</li><li>Daily automated scans</li><li>1-year history</li><li>AI competitor discovery</li><li>RSS/blog monitoring</li><li>/scan + /ads commands</li></ul><button class="btn btn-primary" id="btn-operator" onclick="checkout('operator')">Subscribe</button></div>
-<div class="plan" data-tier="command"><div class="plan-name">Command</div><div class="plan-price" data-monthly="199" data-annual="1990">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>200 pages</li><li>Daily automated scans</li><li>Unlimited history</li><li>Everything in Operator</li><li>Priority scan queue</li><li>Competitor Radar (soon)</li></ul><button class="btn btn-primary" id="btn-command" onclick="checkout('command')">Subscribe</button></div>
+<div class="plan" data-tier="command"><div class="plan-name">Command</div><div class="plan-price" data-monthly="199" data-annual="1990">$199<span class="mo">/mo</span></div><ul class="plan-features"><li>50 competitors</li><li>400 pages</li><li>Daily automated scans</li><li>Unlimited history</li><li>Everything in Operator</li><li>Priority scan queue</li><li>Competitor Radar (soon)</li></ul><button class="btn btn-primary" id="btn-command" onclick="checkout('command')">Subscribe</button></div>
 </div>
 <div class="manage" id="manageSection" style="display:none"><a href="#" onclick="manageSubscription();return false">Manage subscription on Stripe</a></div>
 </div>
@@ -3233,6 +3241,7 @@ const HOSTED_SETUP_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Setup</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
@@ -3415,7 +3424,7 @@ function esc(s){const d=document.createElement("div");d.textContent=s;return d.i
 let currentStep=1,slackVerified=false,slackSkipped=false,competitors=[];
 async function loadUserInfo(){
   try{const r=await fetch("/api/user/profile");if(r.ok){const u=await r.json();
-  const t=u.tier||"scout";const limits={scout:{c:3,p:6},recon:{c:3,p:6},operator:{c:15,p:60},command:{c:50,p:200},strategic:{c:50,p:200}};
+  const t=u.tier||"scout";const limits={scout:{c:3,p:6,ppc:4},recon:{c:3,p:6,ppc:4},operator:{c:15,p:60,ppc:4},command:{c:50,p:400,ppc:8},strategic:{c:50,p:400,ppc:8}};
   const l=limits[t]||limits.scout;
   document.getElementById("tierInfo").innerHTML="You can add up to <strong>"+l.c+" competitors</strong> on your "+t.charAt(0).toUpperCase()+t.slice(1)+" plan.";
   window._tierLimits=l;window._tier=t;
@@ -3466,6 +3475,25 @@ async function loadUserInfo(){
 function goStep(n){
   if(n===2&&!slackVerified&&!slackSkipped){document.getElementById("slackMsg").innerHTML='<div class="msg msg-err">Connect Slack or click Skip for now.</div>';return;}
   if(n===3&&competitors.length===0){alert("Add at least one competitor.");return;}
+  if(n===3){
+    // Validate per-company page limits
+    const maxPpc=window._tierLimits?window._tierLimits.ppc:4;
+    document.querySelectorAll(".page-limit-err").forEach(e=>e.remove());
+    for(let i=0;i<competitors.length;i++){
+      if(competitors[i].pages.length>maxPpc){
+        const card=document.querySelectorAll(".comp-card")[i];
+        if(card){
+          const err=document.createElement("div");
+          err.className="page-limit-err";
+          err.style="color:#c23030;font-size:12px;margin-top:4px;padding:4px 8px;background:#1a0505;border:1px solid #3a1515;border-radius:2px";
+          err.textContent="Too many pages selected ("+competitors[i].pages.length+"/"+maxPpc+" max). Uncheck some pages.";
+          card.querySelector(".pages-list").appendChild(err);
+          card.scrollIntoView({behavior:"smooth",block:"center"});
+        }
+        return;
+      }
+    }
+  }
   currentStep=n;
   document.querySelectorAll(".panel").forEach((p,i)=>{p.classList.toggle("active",i===n-1);});
   document.querySelectorAll(".step-tab").forEach((t,i)=>{t.className="step-tab"+(i===n-1?" active":i<n-1?" done":"");});
@@ -3845,6 +3873,7 @@ const PARTNER_APPLY_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Partner Program</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
@@ -3905,6 +3934,7 @@ const PARTNER_DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Partner Dashboard</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>
@@ -3970,6 +4000,7 @@ const ADMIN_LOGIN_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Admin Login</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -4009,6 +4040,7 @@ const ADMIN_DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+${FAVICON_LINK}
 <title>ScopeHound — Admin Dashboard</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -5304,7 +5336,8 @@ export default {
         for (const c of comps) {
           if (!c.name || !c.website) return jsonResponse({ error: "Competitor missing name or website" }, 400);
           if (!c.pages || c.pages.length === 0) return jsonResponse({ error: `${c.name}: needs at least one page` }, 400);
-          if (c.pages.length > 4) return jsonResponse({ error: `${c.name}: maximum 4 pages per competitor` }, 400);
+          const maxPpc = (isHostedMode(env) && user?.tier) ? (TIERS[user.tier]?.pagesPerComp || 4) : 4;
+          if (c.pages.length > maxPpc) return jsonResponse({ error: `${c.name}: maximum ${maxPpc} pages per competitor` }, 400);
         }
         const prefix = isHostedMode(env) ? `user_config:${user.id}:` : "config:";
         await env.STATE.put(prefix + "competitors", JSON.stringify(comps));
@@ -5499,7 +5532,7 @@ export default {
 
     // ── Privacy Policy ──
     if (path === "/privacy" || path === "/privacy/") {
-      return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy Policy — ScopeHound</title>
+      return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${FAVICON_LINK}<title>Privacy Policy — ScopeHound</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.7}
 a{color:#7a8c52}.wrap{max-width:720px;margin:0 auto;padding:32px 24px}
@@ -5578,7 +5611,7 @@ p,li{font-size:14px;color:#b0b5bd;margin-bottom:8px}ul{margin-left:20px;margin-b
 
     // ── Support / Contact ──
     if (path === "/support" || path === "/support/") {
-      return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Support — ScopeHound</title>
+      return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${FAVICON_LINK}<title>Support — ScopeHound</title>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","vep2hq6ftx");</script>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0c0e;color:#d4d8de;line-height:1.7}
 a{color:#7a8c52}.wrap{max-width:720px;margin:0 auto;padding:32px 24px}
