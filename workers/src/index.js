@@ -2778,6 +2778,7 @@ th{color:#6b7280;font-weight:600;font-size:11px;text-transform:uppercase;letter-
 <a href="/setup" style="font-size:12px;color:#6b7280;padding:8px 12px;border:1px solid #2a3038;border-radius:2px;text-decoration:none;display:flex;align-items:center;gap:4px">+ Manage Competitors</a>
 </div>
 </nav>
+<div id="slackBanner" style="display:none;background:#1a0505;border:1px solid #3a1515;color:#e8a0a0;padding:12px 16px;font-size:13px;margin:0 0 1px 0"></div>
 <main>
 <div id="content"><div class="loading">Loading dashboard data...</div></div>
 </main>
@@ -2796,6 +2797,7 @@ const tabs={overview:renderOverview,changes:renderChanges,pricing:renderPricing,
 document.querySelectorAll("nav button").forEach(btn=>{btn.addEventListener("click",()=>{document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));btn.classList.add("active");if(DATA)tabs[btn.dataset.tab]();});});
 fetch("./api/dashboard-data").then(r=>r.json()).then(d=>{DATA=d;$("lastUpdated").textContent="Last scan: "+timeAgo(d.generatedAt);renderOverview();}).catch(()=>{content.innerHTML='<div class="empty">Failed to load data. <a href="./setup">Run setup</a> or hit /test first.</div>';});
 fetch("./api/user/profile").then(r=>r.ok?r.json():null).then(u=>{if(u&&u.email){$("userBar").innerHTML=esc(u.email)+' &middot; <a href="/auth/logout" style="color:#c23030;text-decoration:none">Sign out</a>';}}).catch(()=>{});
+fetch("./api/config").then(r=>r.ok?r.json():null).then(c=>{if(c&&!c.settings?.slackWebhookUrl){const b=$("slackBanner");b.innerHTML='Your Slack alerts are not connected. Scan results won\'t be delivered. <a href="/setup" style="color:#e8a0a0;text-decoration:underline">Connect Slack in Setup</a>';b.style.display="block";}}).catch(()=>{});
 // ── Scan Now button with cooldown ──
 function updateScanButton(status){
   const btn=$("scanBtn"),cd=$("scanCooldown");
