@@ -387,119 +387,6 @@
       line-height: 1.55;
     }
 
-    /* ===== FIELD REPORT ===== */
-    .field-report {
-      border: 1px solid var(--olive);
-      border-radius: 2px;
-      background: var(--bg-panel);
-      overflow: hidden;
-    }
-
-    .field-report-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 16px 24px;
-      border-bottom: 1px solid var(--border);
-      flex-wrap: wrap;
-      gap: 12px;
-    }
-
-    .fr-priority {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .fr-priority-dot {
-      width: 8px;
-      height: 8px;
-      background: var(--red);
-      display: inline-block;
-      flex-shrink: 0;
-    }
-
-    .fr-priority-label {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--red);
-    }
-
-    .fr-timestamp {
-      font-family: var(--font-mono);
-      font-size: 12px;
-      color: var(--text-muted);
-    }
-
-    .field-report-meta {
-      display: flex;
-      gap: 32px;
-      padding: 16px 24px;
-      border-bottom: 1px solid var(--border);
-      flex-wrap: wrap;
-    }
-
-    .fr-meta-item {
-      display: flex;
-      gap: 8px;
-      align-items: baseline;
-    }
-
-    .fr-meta-label {
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-    }
-
-    .fr-meta-value {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text);
-    }
-
-    .field-report-body {
-      padding: 24px;
-    }
-
-    .fr-section {
-      margin-bottom: 24px;
-    }
-
-    .fr-section:last-child {
-      margin-bottom: 0;
-    }
-
-    .fr-section-label {
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--olive-light);
-      margin-bottom: 8px;
-    }
-
-    .fr-section-text {
-      font-size: 14px;
-      color: var(--text);
-      line-height: 1.65;
-    }
-
-    .fr-divider {
-      border: none;
-      border-top: 1px dashed var(--border);
-      margin: 24px 0;
-    }
-
-    .fr-data-line {
-      font-family: var(--font-mono);
-      font-size: 13px;
-      color: var(--tan);
-      line-height: 1.8;
-    }
 
     /* ===== PRICING ===== */
     .pricing-grid {
@@ -726,6 +613,293 @@
       color: var(--text-muted);
     }
 
+    /* ===== CODEC VIEWER ===== */
+    .codec {
+      border: 2px solid var(--olive);
+      border-radius: 4px;
+      background: var(--bg-panel);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .codec-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--olive);
+      background: rgba(92, 107, 60, 0.08);
+    }
+
+    .codec-freq {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--olive-light);
+      letter-spacing: 0.06em;
+    }
+
+    .codec-status {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--olive-light);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .codec-dot {
+      width: 6px;
+      height: 6px;
+      background: var(--olive-light);
+      border-radius: 50%;
+      animation: codecPulse 2s ease-in-out infinite;
+    }
+
+    @keyframes codecPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    .codec-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    .codec-tab {
+      flex: 1;
+      padding: 12px 16px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s, background 0.2s;
+      font-family: var(--font-mono);
+      text-align: center;
+    }
+
+    .codec-tab:hover {
+      color: var(--text);
+      background: rgba(92, 107, 60, 0.05);
+    }
+
+    .codec-tab.active {
+      color: var(--olive-light);
+      border-bottom-color: var(--olive-light);
+      background: rgba(92, 107, 60, 0.08);
+    }
+
+    .codec-screen {
+      position: relative;
+      background: #080a0c;
+      min-height: 340px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .codec-screen::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(92, 107, 60, 0.03) 2px,
+        rgba(92, 107, 60, 0.03) 4px
+      );
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    .codec-slide {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      opacity: 0;
+      transition: opacity 0.35s ease;
+      z-index: 1;
+    }
+
+    .codec-slide.active {
+      opacity: 1;
+    }
+
+    .codec-slide img {
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 2px;
+      object-fit: contain;
+    }
+
+    .codec-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 20px;
+      border-top: 1px solid var(--olive);
+      background: rgba(92, 107, 60, 0.08);
+    }
+
+    .codec-caption {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--olive-light);
+      letter-spacing: 0.04em;
+    }
+
+    .codec-nav {
+      display: flex;
+      gap: 4px;
+    }
+
+    .codec-nav-dot {
+      width: 8px;
+      height: 8px;
+      border: 1px solid var(--olive);
+      background: none;
+      cursor: pointer;
+      padding: 0;
+      transition: background 0.2s;
+    }
+
+    .codec-nav-dot.active {
+      background: var(--olive-light);
+    }
+
+    /* ===== TRIAL MODAL ===== */
+    .trial-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      z-index: 2000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .trial-overlay.active {
+      display: flex;
+    }
+
+    .trial-modal {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 36px;
+      max-width: 440px;
+      width: 90%;
+      position: relative;
+    }
+
+    .trial-close {
+      position: absolute;
+      top: 12px;
+      right: 16px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 24px;
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    .trial-close:hover {
+      color: var(--text);
+    }
+
+    .trial-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #fff;
+      margin-bottom: 8px;
+    }
+
+    .trial-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+      line-height: 1.5;
+    }
+
+    .trial-modal label {
+      display: block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    .trial-modal input {
+      display: block;
+      width: 100%;
+      margin-top: 6px;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 14px;
+    }
+
+    .trial-modal input:focus {
+      outline: none;
+      border-color: var(--olive);
+    }
+
+    .trial-success {
+      display: none;
+      background: rgba(61, 107, 53, 0.15);
+      border: 1px solid var(--green);
+      color: var(--text);
+      padding: 12px 16px;
+      font-size: 13px;
+      border-radius: 2px;
+      margin-bottom: 16px;
+    }
+
+    .trial-error {
+      display: none;
+      background: rgba(194, 48, 48, 0.15);
+      border: 1px solid var(--red);
+      color: var(--text);
+      padding: 12px 16px;
+      font-size: 13px;
+      border-radius: 2px;
+      margin-bottom: 16px;
+    }
+
+    .trial-submit {
+      width: 100%;
+    }
+
     /* ===== RESPONSIVE ===== */
     @media (max-width: 900px) {
       :root {
@@ -780,9 +954,9 @@
         font-size: 26px;
       }
 
-      .field-report-header {
-        flex-direction: column;
-        align-items: flex-start;
+      .codec-tab {
+        padding: 10px 8px;
+        font-size: 9px;
       }
 
       .footer-inner {
@@ -812,6 +986,10 @@
       .ops-grid .ops-step {
         border: 1px solid var(--border);
         border-radius: 2px;
+      }
+
+      .codec-screen {
+        min-height: 220px;
       }
 
       .pricing-grid {
@@ -882,10 +1060,9 @@
     <div class="container">
       <h1 class="hero-headline">Your competitors changed<br>their <span class="rotate-word"><span class="word" id="rotateWord">pricing</span></span> last night.<br>Check Slack.</h1>
       <p class="hero-subtitle">Pricing changes, feature updates, SEO shifts, blog posts, new market entrants. Monitored, analyzed, and delivered with what changed, why it matters, and what to do about it.</p>
-      <p class="hero-desc">ScopeHound watches your competitors 24/7 and drops an AI-analyzed briefing into Slack every morning. It also sweeps for new competitors entering your space weekly. Open source. $0 to self-host.</p>
+      <p class="hero-desc">ScopeHound watches your competitors daily and drops an AI-analyzed briefing into Slack every morning. It also sweeps for new competitors entering your space weekly. Open source. $0 to self-host.</p>
       <div class="hero-actions">
-        <a href="https://worker.scopehound.app/signin" class="btn btn-primary">Get Started</a>
-        <a href="#field-report" class="btn btn-secondary">View Live Demo</a>
+        <a href="#pricing" class="btn btn-primary">Get Started</a>
       </div>
     </div>
     <div class="container"><div class="section-divider"></div></div>
@@ -920,6 +1097,18 @@
           <div class="cap-title">AI Assessment</div>
           <p class="cap-desc">What changed. Why it matters. What to do about it. Every alert includes prioritized, actionable analysis.</p>
         </div>
+        <div class="cap-card">
+          <div class="cap-title">Product Hunt Radar</div>
+          <p class="cap-desc">Monitors Product Hunt for new launches in your space. Know about competitors on day one, not day sixty.</p>
+        </div>
+        <div class="cap-card">
+          <div class="cap-title">Slack Commands</div>
+          <p class="cap-desc">Manage everything from Slack. Add competitors, trigger scans, check ads, filter alerts &mdash; all via slash commands.</p>
+        </div>
+        <div class="cap-card">
+          <div class="cap-title">Auto-Discovery</div>
+          <p class="cap-desc">Add a URL, get a full setup. ScopeHound auto-discovers pricing pages, feature pages, blogs, careers, and product catalogs.</p>
+        </div>
       </div>
     </div>
     <div class="container"><div class="section-divider"></div></div>
@@ -950,44 +1139,43 @@
     <div class="container"><div class="section-divider"></div></div>
   </section>
 
-  <!-- ============ FIELD REPORT ============ -->
-  <section id="field-report">
+  <!-- ============ CODEC VIEWER ============ -->
+  <section id="previews">
     <div class="container">
-      <div class="section-label"><span>Sample Field Report</span></div>
-      <div class="field-report">
-        <div class="field-report-header">
-          <div class="fr-priority">
-            <span class="fr-priority-dot"></span>
-            <span class="fr-priority-label">High Priority</span>
-          </div>
-          <div class="fr-timestamp">06 FEB 2026 / 0900 UTC</div>
+      <div class="section-label"><span>In Action</span></div>
+      <div class="codec">
+        <div class="codec-header">
+          <div class="codec-freq" id="codecFreq">141.80</div>
+          <div class="codec-status"><span class="codec-dot"></span> RECEIVING</div>
         </div>
-        <div class="field-report-meta">
-          <div class="fr-meta-item">
-            <span class="fr-meta-label">Target:</span>
-            <span class="fr-meta-value">ArmsTech</span>
+        <div class="codec-tabs">
+          <button class="codec-tab active" data-slide="0">Daily Intel Drop</button>
+          <button class="codec-tab" data-slide="1">Slack Commands</button>
+          <button class="codec-tab" data-slide="2">Competitor Discovery</button>
+          <button class="codec-tab" data-slide="3">Competitor Radar</button>
+        </div>
+        <div class="codec-screen">
+          <div class="codec-slide active" data-index="0">
+            <img src="scopehound_preview.png" alt="ScopeHound daily intel drop in Slack">
           </div>
-          <div class="fr-meta-item">
-            <span class="fr-meta-label">Sector:</span>
-            <span class="fr-meta-value">Pricing</span>
+          <div class="codec-slide" data-index="1">
+            <img src="scopehound_commands.png" alt="ScopeHound Slack commands">
+          </div>
+          <div class="codec-slide" data-index="2">
+            <img src="scopehound_discovery.png" alt="Weekly competitor discovery in Slack">
+          </div>
+          <div class="codec-slide" data-index="3">
+            <img src="scopehound_radar_setup.png" alt="Competitor Radar Reddit monitoring">
           </div>
         </div>
-        <div class="field-report-body">
-          <div class="fr-section">
-            <div class="fr-section-label">Change Detected</div>
-            <p class="fr-section-text">Starter plan increased from $29/mo to $39/mo. New "Enterprise" tier added at $199/mo.</p>
+        <div class="codec-footer">
+          <div class="codec-caption" id="codecCaption">AI-analyzed daily briefing delivered to Slack</div>
+          <div class="codec-nav">
+            <button class="codec-nav-dot active" data-slide="0"></button>
+            <button class="codec-nav-dot" data-slide="1"></button>
+            <button class="codec-nav-dot" data-slide="2"></button>
+            <button class="codec-nav-dot" data-slide="3"></button>
           </div>
-          <div class="fr-section">
-            <div class="fr-section-label">Assessment</div>
-            <p class="fr-section-text">34% price increase on entry plan signals confidence in product-market fit. New enterprise tier indicates upmarket positioning shift. This may create churn among price-sensitive customers in their pipeline.</p>
-          </div>
-          <div class="fr-section">
-            <div class="fr-section-label">Recommended Action</div>
-            <p class="fr-section-text">Review pricing positioning. Highlight your free tier in comparison materials targeting ArmsTech customers. Consider targeted outreach to ArmsTech's mid-market segment.</p>
-          </div>
-          <hr class="fr-divider">
-          <div class="fr-data-line">Starter: $29/mo &rarr; $39/mo</div>
-          <div class="fr-data-line">New: Enterprise at $199/mo</div>
         </div>
       </div>
     </div>
@@ -1027,6 +1215,7 @@
             <li>Dashboard + Slack alerts</li>
           </ul>
           <a href="https://worker.scopehound.app/signin" class="btn btn-secondary">Get Started</a>
+          <button class="btn btn-tan trial-trigger" style="width:100%;margin-top:8px;padding:8px 28px;">Or request a free trial</button>
         </div>
         <!-- Operator -->
         <div class="pricing-card highlighted">
@@ -1058,7 +1247,7 @@
             <li>Unlimited history</li>
             <li>Everything in Operator</li>
             <li>Priority scan queue</li>
-            <li>Competitor Radar (soon)</li>
+            <li>Competitor Radar</li>
           </ul>
           <a href="https://worker.scopehound.app/signin" class="btn btn-secondary">Take Command</a>
         </div>
@@ -1106,8 +1295,6 @@
       <div class="footer-links">
         <span class="footer-brand">ScopeHound</span>
         <a href="https://github.com/ZeroLupo/scopehound" class="footer-link">GitHub</a>
-        <a href="#" class="footer-link">Docs</a>
-        <a href="#" class="footer-link">MIT License</a>
       </div>
       <div class="footer-tagline">Built for operators who refuse to be blindsided.</div>
     </div>
@@ -1153,16 +1340,66 @@
 
 <script>
 (function(){
-  const words=["pricing","blog","features","hiring plans","roadmap"];
-  let i=0;
-  const el=document.getElementById("rotateWord");
-  setInterval(()=>{
+  var words=["pricing","blog","features","hiring plans","positioning"];
+  var i=0;
+  var el=document.getElementById("rotateWord");
+  setInterval(function(){
     i=(i+1)%words.length;
     el.style.animation="none";
     el.offsetHeight;
     el.textContent=words[i];
     el.style.animation="rotateIn 0.4s ease";
   },1000);
+})();
+</script>
+
+<script>
+(function(){
+  var captions=["AI-analyzed daily briefing delivered to Slack","Manage everything from Slack","Weekly competitor discovery","Competitor Radar — Reddit monitoring"];
+  var freqs=["140.96","141.80","140.85","141.12"];
+  var slides=document.querySelectorAll(".codec-slide");
+  var tabs=document.querySelectorAll(".codec-tab");
+  var dots=document.querySelectorAll(".codec-nav-dot");
+  var caption=document.getElementById("codecCaption");
+  var freq=document.getElementById("codecFreq");
+  var current=0;
+  var autoTimer;
+
+  function switchTo(idx){
+    current=idx;
+    slides.forEach(function(s){s.classList.remove("active");});
+    tabs.forEach(function(t){t.classList.remove("active");});
+    dots.forEach(function(d){d.classList.remove("active");});
+    slides[idx].classList.add("active");
+    tabs[idx].classList.add("active");
+    dots[idx].classList.add("active");
+    caption.textContent=captions[idx];
+    freq.textContent=freqs[idx];
+  }
+
+  function autoAdvance(){
+    autoTimer=setInterval(function(){
+      switchTo((current+1)%slides.length);
+    },5000);
+  }
+
+  tabs.forEach(function(tab){
+    tab.addEventListener("click",function(){
+      clearInterval(autoTimer);
+      switchTo(parseInt(this.getAttribute("data-slide")));
+      autoAdvance();
+    });
+  });
+
+  dots.forEach(function(dot){
+    dot.addEventListener("click",function(){
+      clearInterval(autoTimer);
+      switchTo(parseInt(this.getAttribute("data-slide")));
+      autoAdvance();
+    });
+  });
+
+  autoAdvance();
 })();
 </script>
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
@@ -1185,6 +1422,84 @@ $(document).ready(function(){
         });
     }, 2000);
 });
+</script>
+
+<!-- ============ TRIAL MODAL ============ -->
+<div class="trial-overlay" id="trialOverlay">
+  <div class="trial-modal">
+    <button class="trial-close" id="trialClose">&times;</button>
+    <div class="trial-title">Request a Free Trial</div>
+    <p class="trial-desc">Tell us about your product and we will set up a free trial for you.</p>
+    <form id="trialForm">
+      <label>Name<input type="text" name="name" required placeholder="Your name"></label>
+      <label>Email<input type="email" name="email" required placeholder="you@company.com"></label>
+      <label>Website<input type="url" name="website" required placeholder="https://yourproduct.com"></label>
+      <div class="trial-success" id="trialSuccess">Request sent! We will be in touch within 24 hours.</div>
+      <div class="trial-error" id="trialError"></div>
+      <button type="submit" class="btn btn-primary trial-submit" id="trialBtn">Send Request</button>
+    </form>
+  </div>
+</div>
+
+<script>
+(function(){
+  var overlay=document.getElementById("trialOverlay");
+  var form=document.getElementById("trialForm");
+  var btn=document.getElementById("trialBtn");
+  var success=document.getElementById("trialSuccess");
+  var error=document.getElementById("trialError");
+
+  document.querySelectorAll(".trial-trigger").forEach(function(el){
+    el.addEventListener("click",function(e){
+      e.preventDefault();
+      overlay.classList.add("active");
+    });
+  });
+
+  document.getElementById("trialClose").addEventListener("click",function(){
+    overlay.classList.remove("active");
+  });
+
+  overlay.addEventListener("click",function(e){
+    if(e.target===overlay)overlay.classList.remove("active");
+  });
+
+  form.addEventListener("submit",function(e){
+    e.preventDefault();
+    error.style.display="none";
+    btn.disabled=true;
+    btn.textContent="Sending...";
+    var fd=new FormData(form);
+    fetch("https://worker.scopehound.app/api/contact",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        name:fd.get("name"),
+        email:fd.get("email"),
+        website:fd.get("website"),
+        message:"Free trial request",
+        type:"trial_request"
+      })
+    }).then(function(r){return r.json();}).then(function(data){
+      if(data.error){
+        error.textContent=data.error;
+        error.style.display="block";
+        btn.disabled=false;
+        btn.textContent="Send Request";
+      }else{
+        success.style.display="block";
+        btn.style.display="none";
+        var labels=form.querySelectorAll("label");
+        for(var i=0;i<labels.length;i++)labels[i].style.display="none";
+      }
+    }).catch(function(){
+      error.textContent="Something went wrong. Please try again.";
+      error.style.display="block";
+      btn.disabled=false;
+      btn.textContent="Send Request";
+    });
+  });
+})();
 </script>
 </body>
 </html>

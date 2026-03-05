@@ -1560,6 +1560,9 @@ th{color:#6b7280;font-weight:600;font-size:10px;text-transform:uppercase;letter-
 .contact-actions button{background:none;border:1px solid #2a3038;color:#6b7280;padding:4px 10px;border-radius:2px;font-size:10px;cursor:pointer;text-transform:uppercase;letter-spacing:0.04em}
 .contact-actions button:hover{border-color:#5c6b3c;color:#d4d8de}
 .contact-actions button.del:hover{border-color:#c23030;color:#c23030}
+.type-badge{font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;padding:2px 8px;border-radius:2px;margin-right:8px}
+.type-badge.trial{background:rgba(196,167,71,0.15);color:#c4a747;border:1px solid #c4a747}
+.contact-meta .website{color:#5c6b3c;font-size:12px;text-decoration:underline}
 .empty-state{text-align:center;padding:48px;color:#6b7280;font-size:13px}
 </style>
 </head>
@@ -1646,7 +1649,11 @@ function renderContacts(contacts){
   let h='';
   for(const c of contacts){
     h+='<div class="contact-msg'+(c.read?'':' unread')+'" id="msg-'+esc(c.id)+'">';
-    h+='<div class="contact-meta"><span class="name">'+esc(c.name)+'</span><span class="email">'+esc(c.email)+'</span><span class="time">'+timeAgo(c.createdAt)+'</span></div>';
+    h+='<div class="contact-meta">';
+    if(c.type==='trial_request')h+='<span class="type-badge trial">Trial Request</span>';
+    h+='<span class="name">'+esc(c.name)+'</span><span class="email">'+esc(c.email)+'</span>';
+    if(c.website)h+='<a href="'+esc(c.website)+'" target="_blank" class="website">'+esc(c.website)+'</a>';
+    h+='<span class="time">'+timeAgo(c.createdAt)+'</span></div>';
     h+='<div class="contact-body">'+esc(c.message)+'</div>';
     h+='<div class="contact-actions">';
     if(!c.read)h+='<button onclick="markRead(\\''+c.id+'\\')">Mark Read</button>';

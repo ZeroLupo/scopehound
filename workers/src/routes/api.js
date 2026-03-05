@@ -307,6 +307,8 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
       const name = (body.name || "").trim().slice(0, 200);
       const email = (body.email || "").trim().slice(0, 200);
       const message = (body.message || "").trim().slice(0, 2000);
+      const website = (body.website || "").trim().slice(0, 500);
+      const type = (body.type || "general").trim().slice(0, 50);
       if (!name || !email || !message) return jsonResponse({ error: "Name, email, and message are required" }, 400);
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return jsonResponse({ error: "Invalid email address" }, 400);
       const ip = request.headers.get("CF-Connecting-IP") || "unknown";
@@ -322,7 +324,7 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
         await env.STATE.put(rlKey, JSON.stringify({ count: rlData.count + 1, first: rlData.first }), { expirationTtl: 3600 });
       }
       const id = crypto.randomUUID();
-      const entry = { id, name, email, message, ip, createdAt: new Date().toISOString(), read: false };
+      const entry = { id, name, email, message, website, type, ip, createdAt: new Date().toISOString(), read: false };
       await env.STATE.put("contact:" + id, JSON.stringify(entry));
       const headers = new Headers(SECURITY_HEADERS);
       headers.set("Access-Control-Allow-Origin", allowedOrigin);
