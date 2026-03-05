@@ -4,12 +4,15 @@
   "description": "AI-powered competitive intelligence agent. Monitors competitor pricing, features, SEO, blogs, and Product Hunt launches. Delivers prioritized, AI-analyzed alerts to Slack.",
   "main": "index.js",
   "scripts": {
-    "test": "npx playwright test"
+    "test": "cd workers && npx vitest run",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@playwright/test": "^1.58.2"
+    "@playwright/test": "^1.58.2",
+    "wrangler": "^4.70.0"
   }
 }
