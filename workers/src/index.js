@@ -19,7 +19,7 @@ import { handlePages } from "./routes/pages.js";
 
 export default {
   async scheduled(event, env, cfCtx) {
-    cfCtx.waitUntil(handleScheduled(env));
+    cfCtx.waitUntil(handleScheduled(env, event.cron));
   },
 
   async fetch(request, env, cfCtx) {

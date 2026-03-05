@@ -3,9 +3,11 @@ main = "src/index.js"
 compatibility_date = "2026-02-12"
 compatibility_flags = ["nodejs_compat"]
 
-# Cron trigger - runs once daily at 9am UTC (Scout: manual only, Operator+Command: daily)
+# Cron triggers:
+#   Daily at 9am UTC — page scans (Scout: manual only, Operator+Command: daily)
+#   Fridays at 3pm UTC — weekly competitor suggestions
 [triggers]
-crons = ["0 9 * * *"]
+crons = ["0 9 * * *", "0 15 * * 5"]
 
 # KV namespace for storing state
 [[kv_namespaces]]
