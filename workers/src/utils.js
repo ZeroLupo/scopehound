@@ -50,7 +50,10 @@ export function isUrlSafe(urlStr) {
   try {
     const u = new URL(urlStr);
     if (u.protocol !== "https:" && u.protocol !== "http:") return false;
-    const host = u.hostname;
+    if (u.username || u.password) return false; // Block basic auth URLs
+    let host = u.hostname;
+    // Normalize IPv6-mapped IPv4 (e.g. ::ffff:127.0.0.1 → 127.0.0.1)
+    if (/^\[?::ffff:/i.test(host)) host = host.replace(/^\[?::ffff:/i, "").replace(/\]$/, "");
     // Block private/reserved IP ranges and localhost
     if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|0\.|169\.254\.|fc|fd|fe80|::1|localhost|0\.0\.0\.0)/i.test(host)) return false;
     // Block metadata endpoints

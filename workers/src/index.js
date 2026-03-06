@@ -27,14 +27,27 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const reqOrigin = request.headers.get("Origin");
-    const isSameHost = reqOrigin && new URL(reqOrigin).hostname === url.hostname;
-    const isScopeHoundApp = reqOrigin && /^https:\/\/(www\.)?scopehound\.app$/.test(reqOrigin);
-    const allowedOrigin = (isSameHost || isScopeHoundApp) ? reqOrigin : url.origin;
+    let allowedOrigin = null;
+    if (reqOrigin) {
+      try {
+        const originHost = new URL(reqOrigin).hostname;
+        // Strict allowlist: same host, scopehound.app, or configured custom origins
+        if (originHost === url.hostname ||
+            /^(www\.)?scopehound\.app$/.test(originHost)) {
+          allowedOrigin = reqOrigin;
+        } else if (env.ALLOWED_ORIGINS) {
+          // Self-hosted deployments can configure custom origins
+          const custom = env.ALLOWED_ORIGINS.split(",").map(s => s.trim());
+          if (custom.includes(reqOrigin)) allowedOrigin = reqOrigin;
+        }
+      } catch {} // Expected: malformed Origin header
+    }
 
     // CORS preflight
     if (request.method === "OPTIONS") {
+      if (!allowedOrigin) return new Response(null, { status: 403 });
       return new Response(null, {
-        headers: { "Access-Control-Allow-Origin": allowedOrigin, "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,X-Admin-Token" },
+        headers: { "Access-Control-Allow-Origin": allowedOrigin, "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type" },
       });
     }
 

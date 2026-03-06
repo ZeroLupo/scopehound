@@ -29,6 +29,14 @@ import { detectRssFeed, discoverPages } from "../discovery.js";
 import { runMonitor } from "../scanner.js";
 import { aggregateKPIs } from "../admin.js";
 
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // Server-to-server (no Origin header) is fine
+  try {
+    const h = new URL(origin).hostname;
+    return /^(www\.)?scopehound\.app$/.test(h);
+  } catch { return false; }
+}
+
 export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -244,7 +252,7 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
       const rlKey = "partner_stats_rl:" + ip;
       const rlData = JSON.parse(await env.STATE.get(rlKey) || "null");
       const now = Date.now();
-      if (rlData && rlData.count >= 20 && (now - rlData.first) < 900000) {
+      if (rlData && rlData.count >= 5 && (now - rlData.first) < 900000) {
         return jsonResponse({ error: "Too many requests. Please try again later." }, 429);
       }
       if (!rlData || (now - rlData.first) >= 900000) {
@@ -256,7 +264,8 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
       const email = url.searchParams.get("email");
       if (!code || !email) return jsonResponse({ error: "code and email required" }, 400);
       const raw = await env.STATE.get("affiliate:" + code);
-      if (!raw) return jsonResponse({ error: "Affiliate not found" }, 404);
+      // Return same generic error whether code doesn't exist or email doesn't match
+      if (!raw) return jsonResponse({ error: "Invalid credentials" }, 401);
       const affiliate = JSON.parse(raw);
       if (affiliate.email !== email) return jsonResponse({ error: "Invalid credentials" }, 401);
       const refsRaw = await env.STATE.get("affiliate:" + code + ":referrals");
@@ -274,8 +283,10 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
     // ── Partner: admin approve/reject ──
     if (path === "/api/admin/partner/approve" && request.method === "POST") {
       const adminSession = await getAdminSession(request, env);
-      const authErr = requireAuth(request, env);
-      if (!adminSession && authErr) return authErr;
+      if (!adminSession) {
+        const authErr = requireAuth(request, env);
+        if (authErr) return authErr;
+      }
       const body = await request.json();
       if (!body.code) return jsonResponse({ error: "code required" }, 400);
       const raw = await env.STATE.get("affiliate:" + body.code);
@@ -302,6 +313,11 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
 
   // ── Contact form (public POST, admin GET) ──
   if (path === "/api/contact" && request.method === "POST") {
+    // Block cross-origin submissions from unknown sites
+    const origin = request.headers.get("Origin");
+    if (origin && !isAllowedOrigin(origin) && !new URL(origin).hostname.includes(url.hostname)) {
+      return jsonResponse({ error: "Forbidden" }, 403);
+    }
     try {
       const body = await request.json();
       const name = (body.name || "").trim().slice(0, 200);
@@ -371,8 +387,10 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
   // ── Admin: Create test session (staging/dev bypass for OAuth) ──
   if (path === "/api/admin/test-session" && request.method === "POST") {
     const adminSession = await getAdminSession(request, env);
-    const authErr = requireAuth(request, env);
-    if (!adminSession && authErr) return authErr;
+    if (!adminSession) {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
+    }
     const testUserId = "test_admin";
     const testUser = {
       id: testUserId,
@@ -392,8 +410,10 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
   // ── Admin: Manual cron trigger (for testing) ──
   if (path === "/api/admin/trigger-cron" && request.method === "POST") {
     const adminSession = await getAdminSession(request, env);
-    const authErr = requireAuth(request, env);
-    if (!adminSession && authErr) return authErr;
+    if (!adminSession) {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
+    }
 
     const userId = url.searchParams.get("user") || null;
     const dryRun = url.searchParams.get("dry_run") === "true";
@@ -518,8 +538,10 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
   // ── Admin: Migrate tier names ──
   if (path === "/api/admin/migrate-tiers" && request.method === "POST") {
     const adminSession = await getAdminSession(request, env);
-    const authErr = requireAuth(request, env);
-    if (!adminSession && authErr) return authErr;
+    if (!adminSession) {
+      const authErr = requireAuth(request, env);
+      if (authErr) return authErr;
+    }
     const dryRun = url.searchParams.get("dry_run") === "true";
     const tierMap = { recon: "scout", strategic: "command" };
     const results = [];
@@ -666,15 +688,17 @@ export async function handleApi(ctx, request, env, url, path, allowedOrigin) {
 
     if (userId) {
       const tier = (user.tier || "scout").toLowerCase();
-      if (tier === "scout" || tier === "recon") {
-        const cooldownKey = `user_state:${userId}:lastManualScan`;
-        const lastScanRaw = await env.STATE.get(cooldownKey);
-        if (lastScanRaw) {
-          const hoursSince = (Date.now() - new Date(lastScanRaw).getTime()) / (1000 * 60 * 60);
-          if (hoursSince < 24) {
-            const nextScanAt = new Date(new Date(lastScanRaw).getTime() + 24 * 60 * 60 * 1000).toISOString();
-            return jsonResponse({ error: "Scan cooldown active", cooldown: true, nextScanAt, hoursRemaining: Math.ceil(24 - hoursSince) }, 429);
-          }
+      const cooldownKey = `user_state:${userId}:lastManualScan`;
+      const lastScanRaw = await env.STATE.get(cooldownKey);
+      if (lastScanRaw) {
+        const msSince = Date.now() - new Date(lastScanRaw).getTime();
+        const hoursSince = msSince / (1000 * 60 * 60);
+        // Scout: 24h cooldown, Operator/Command: 5-minute cooldown
+        const isScout = tier === "scout" || tier === "recon";
+        const cooldownHours = isScout ? 24 : (5 / 60);
+        if (hoursSince < cooldownHours) {
+          const nextScanAt = new Date(new Date(lastScanRaw).getTime() + cooldownHours * 60 * 60 * 1000).toISOString();
+          return jsonResponse({ error: "Scan cooldown active", cooldown: true, nextScanAt, hoursRemaining: Math.ceil(cooldownHours - hoursSince) }, 429);
         }
       }
     }

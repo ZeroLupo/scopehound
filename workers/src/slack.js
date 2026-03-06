@@ -89,9 +89,10 @@ export function formatDigestHeader(alerts) {
 function isValidSlackWebhook(urlStr) {
   try {
     const u = new URL(urlStr);
-    return u.protocol === "https:" &&
-      (u.hostname === "hooks.slack.com" ||
-       u.hostname.endsWith(".slack-gov.com"));
+    if (u.protocol !== "https:" || u.username || u.password) return false;
+    const h = u.hostname;
+    return h === "hooks.slack.com" ||
+      (h.endsWith(".slack-gov.com") && /^[a-z0-9-]+\.slack-gov\.com$/.test(h));
   } catch {
     return false;
   }

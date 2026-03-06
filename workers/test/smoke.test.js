@@ -288,13 +288,23 @@ describe("Error Resilience", () => {
     expect(res.status).not.toBe(500);
   });
 
-  it("OPTIONS request returns CORS headers", async () => {
+  it("OPTIONS request returns CORS headers for allowed origin", async () => {
     const res = await SELF.fetch(
       new Request(BASE + "/api/config", {
         method: "OPTIONS",
-        headers: { Origin: "https://example.com" },
+        headers: { Origin: "https://scopehound.app" },
       })
     );
     expect(res.status).toBe(200);
+  });
+
+  it("OPTIONS request returns 403 for unknown origin", async () => {
+    const res = await SELF.fetch(
+      new Request(BASE + "/api/config", {
+        method: "OPTIONS",
+        headers: { Origin: "https://evil.com" },
+      })
+    );
+    expect(res.status).toBe(403);
   });
 });
