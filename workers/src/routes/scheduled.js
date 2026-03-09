@@ -21,32 +21,34 @@ export async function handleScheduled(env, cron) {
     let list = raw ? JSON.parse(raw) : [];
 
     // Self-repair: find users with config who aren't in the subscribers list
-    if (!isWeeklyCron) {
-      try {
-        const configKeys = await env.STATE.list({ prefix: "user_config:" });
-        const userIdsWithConfig = [...new Set(configKeys.keys.map(k => k.name.split(":")[1]).filter(Boolean))];
-        const missing = userIdsWithConfig.filter(id => !list.includes(id));
-        for (const id of missing) {
-          const uRaw = await env.STATE.get("user:" + id);
-          if (!uRaw) continue;
-          const user = JSON.parse(uRaw);
-          if (user.subscriptionStatus !== "active") continue;
-          list.push(id);
-          console.log(`[self-repair] Re-added ${user.email} to active_subscribers`);
+    try {
+      const configKeys = await env.STATE.list({ prefix: "user_config:" });
+      const userIdsWithConfig = [...new Set(configKeys.keys.map(k => k.name.split(":")[1]).filter(Boolean))];
+      const missing = userIdsWithConfig.filter(id => !list.includes(id));
+      for (const id of missing) {
+        const uRaw = await env.STATE.get("user:" + id);
+        if (!uRaw) continue;
+        const user = JSON.parse(uRaw);
+        if (user.subscriptionStatus !== "active") continue;
+        list.push(id);
+        console.log(`[self-repair] Re-added ${user.email} to active_subscribers`);
+        if (!isWeeklyCron) {
           const cfg = await loadConfig(env, id);
           if (cfg.settings.slackWebhookUrl) {
             const ctx = createContext();
             await sendSlack(ctx, cfg.settings.slackWebhookUrl, "🐺 *ScopeHound Notice*\n\nYour account was missing from the daily scan list and has been automatically repaired. Scans will now run normally.");
           }
         }
-        if (missing.length > 0) {
-          await env.STATE.put("active_subscribers", JSON.stringify(list));
-        }
-      } catch (e) {
-        console.log(`[self-repair] Error: ${e.message}`);
       }
+      if (missing.length > 0) {
+        await env.STATE.put("active_subscribers", JSON.stringify(list));
+      }
+    } catch (e) {
+      console.log(`[self-repair] Error: ${e.message}`);
+    }
 
-      // Always run global config scan (admin/owner data from self-hosted setup)
+    // Global config scan (daily cron only)
+    if (!isWeeklyCron) {
       try {
         const globalConfig = await loadConfig(env);
         if (globalConfig.competitors.length > 0) {
@@ -60,6 +62,7 @@ export async function handleScheduled(env, cron) {
     }
 
     const isFirstFriday = new Date().getUTCDate() <= 7;
+    console.log(`[cron] ${isWeeklyCron ? "Weekly suggestions" : "Daily scan"} — ${list.length} subscriber(s)${isWeeklyCron && isFirstFriday ? " (first Friday — deep mode)" : ""}`);
 
     for (const userId of list) {
       try {
