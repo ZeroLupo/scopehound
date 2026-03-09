@@ -142,7 +142,8 @@ Respond with ONLY valid JSON:
 {"summary":"One specific sentence about what changed (reference actual content)","analysis":"2-3 sentences: competitive implications — what this signals about their strategy, how it affects the market","priority":"high or medium or low","recommendation":"One specific, actionable sentence"}
 
 Priority: high = pricing changes, new/removed products, major positioning shifts. medium = feature messaging, value prop changes, new integrations. low = copy edits, date updates, formatting.
-IMPORTANT: Reference the ACTUAL content that changed. Never say generic things like "page content changed" or "review the page". If the diff is trivial, say so specifically.`;
+IMPORTANT: Reference the ACTUAL content that changed. Never say generic things like "page content changed" or "review the page". If the diff is trivial, say so specifically.
+CAREERS/HIRING PAGES: When job listings are removed, it almost always means the role was filled — NOT that they are "restructuring" or "shifting strategy". When new roles are added, that signals hiring/growth in that area. Frame careers changes around team growth and hiring velocity, not organizational pivots.`;
 
   // Prefer Claude Haiku for quality; fall back to Workers AI
   if (env.ANTHROPIC_API_KEY) {
