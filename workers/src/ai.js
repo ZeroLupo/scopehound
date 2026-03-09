@@ -598,24 +598,44 @@ JSON only:
 }
 
 export async function fetchRedditRSS(ctx, subreddit) {
-  if (!canSubrequest(ctx)) return [];
+  if (!canSubrequest(ctx)) { console.log(`  Radar r/${subreddit}: skipped (subrequest budget)`); return []; }
   try {
     trackSubrequest(ctx);
     const r = await fetch(`https://www.reddit.com/r/${subreddit}/new.json?limit=25`, {
-      headers: { "User-Agent": "ScopeHound/1.0 competitive-intel-bot" },
+      headers: { "User-Agent": "ScopeHound/3.0 (competitive intelligence; +https://scopehound.app)" },
     });
-    if (!r.ok) return [];
+    if (!r.ok) {
+      console.log(`  Radar r/${subreddit}: Reddit returned ${r.status}`);
+      // Reddit 429 — wait and retry once
+      if (r.status === 429) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        trackSubrequest(ctx);
+        const retry = await fetch(`https://www.reddit.com/r/${subreddit}/new.json?limit=25`, {
+          headers: { "User-Agent": "ScopeHound/3.0 (competitive intelligence; +https://scopehound.app)" },
+        });
+        if (!retry.ok) { console.log(`  Radar r/${subreddit}: retry also failed (${retry.status})`); return []; }
+        const data = await retry.json();
+        const posts = (data?.data?.children || []);
+        console.log(`  Radar r/${subreddit}: ${posts.length} posts (after retry)`);
+        return posts.map(c => ({
+          id: c.data.id, title: c.data.title,
+          selftext: (c.data.selftext || "").slice(0, 500),
+          url: `https://reddit.com${c.data.permalink}`,
+          author: c.data.author, created: c.data.created_utc, score: c.data.score,
+        }));
+      }
+      return [];
+    }
     const data = await r.json();
-    return (data?.data?.children || []).map(c => ({
-      id: c.data.id,
-      title: c.data.title,
+    const posts = (data?.data?.children || []);
+    console.log(`  Radar r/${subreddit}: ${posts.length} posts`);
+    return posts.map(c => ({
+      id: c.data.id, title: c.data.title,
       selftext: (c.data.selftext || "").slice(0, 500),
       url: `https://reddit.com${c.data.permalink}`,
-      author: c.data.author,
-      created: c.data.created_utc,
-      score: c.data.score,
+      author: c.data.author, created: c.data.created_utc, score: c.data.score,
     }));
-  } catch (e) { console.log(`[ai:fetchRedditRSS] ${e.message}`); return []; }
+  } catch (e) { console.log(`  Radar r/${subreddit}: error — ${e.message}`); return []; }
 }
 
 export async function radarScanReddit(ctx, env, settings, state, productMeta, existingCompetitors) {
@@ -637,16 +657,22 @@ export async function radarScanReddit(ctx, env, settings, state, productMeta, ex
     const subName = typeof sub === "string" ? sub : sub.name;
     console.log(`  Radar: r/${subName}...`);
     const posts = await fetchRedditRSS(ctx, subName);
+    let newCount = 0;
+    let matchCount = 0;
     for (const p of posts) {
       if (seenIds.has(p.id)) continue;
       seenIds.add(p.id);
+      newCount++;
       // Keyword match on title + body
       const text = (p.title + " " + p.selftext).toLowerCase();
       if (keywords.some(k => text.includes(k))) {
+        matchCount++;
         newPosts.push({ ...p, subreddit: subName });
       }
     }
+    console.log(`  Radar r/${subName}: ${posts.length} fetched, ${newCount} new, ${matchCount} keyword matches`);
   }
+  console.log(`  Radar keywords: [${keywords.slice(0, 10).join(", ")}]`);
 
   // Update seen IDs (keep last 500 to avoid unbounded growth)
   state.radar = { seenPostIds: [...seenIds].slice(-500) };
